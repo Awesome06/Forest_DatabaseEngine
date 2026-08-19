@@ -1,0 +1,34 @@
+name: Build and Test
+
+# Trigger this pipeline on every push or pull request to the main branch
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+
+jobs:
+  test:
+    name: Run Tests
+    # Use a matrix to test on both Linux and macOS (important for disk I/O)
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.22'
+
+    - name: Verify Dependencies
+      run: go mod verify
+
+    - name: Run Unit & Race Tests
+      # The -race flag ensures your lock-free atomic pointers are safe
+      run: go test -v -race ./...
