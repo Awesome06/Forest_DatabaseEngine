@@ -4,29 +4,39 @@ import (
 	"sync/atomic"
 )
 
-// Manifest tracks active files for an Engine version.
-// Using this structure allows readers to lock-free access files, while 
-// writers (compactors) create a new Version and atomically swap the pointer.
+// Manifest tracks all active SSTable files comprising a specific point-in-time state of the database.
+// By isolating the file lists inside an immutable Manifest, background compaction workers can freely 
+// generate a new Manifest and atomically swap the engine pointer, leaving concurrent readers completely unaffected.
 type Manifest struct {
 	L0Files []string
 	L1Files []string
 }
 
-// Version represents an immutable point-in-time view of the Manifest.
+// Version represents an immutable, reference-counted snapshot of the Manifest.
+// This is the core of our Multi-Version Concurrency Control (MVCC) and RCU design.
 type Version struct {
 	Manifest Manifest
 	Refs     atomic.Int32
 }
 
-// Acquire increments the reference count.
-// Called by TCP readers before reading from SSTables.
-func (v *Version) Acquire() {
-	v.Refs.Add(1)
+// Acquire increments the reference count for this specific version.
+// It returns true if successful, or false if the version has already been marked for purge.
+func (v *Version) Acquire() bool {
+	for {
+		refs := v.Refs.Load()
+		if refs < 0 {
+			return false
+		}
+		if v.Refs.CompareAndSwap(refs, refs+1) {
+			return true
+		}
+	}
 }
 
 // Release decrements the reference count.
-// Called by TCP readers when they are done. When Refs drops to 0,
-// obsolete files from this version can be safely purged.
+// It must be called via defer by readers when their operation completes.
+// Once a Version is detached from the active database pointer and its Refs drop to 0, 
+// the compaction workers are safely permitted to unlink its obsolete files from disk.
 func (v *Version) Release() {
 	v.Refs.Add(-1)
 }

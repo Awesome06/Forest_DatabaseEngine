@@ -10,6 +10,8 @@ import (
 	"github.com/Forest_DatabaseEngine/internal/network"
 )
 
+// TestWAL_AppendAndRecover verifies that standard Put operations survive a crash
+// by persisting to the WAL and correctly reconstructing the MemTable.
 func TestWAL_AppendAndRecover(t *testing.T) {
 	tempDir := t.TempDir()
 	walPath := filepath.Join(tempDir, "test.wal")
@@ -22,10 +24,10 @@ func TestWAL_AppendAndRecover(t *testing.T) {
 	key1, val1 := []byte("key1"), []byte("val1")
 	key2, val2 := []byte("key2"), []byte("val2")
 
-	_ = wal.Append(network.OpEcho, key1, val1)
-	_ = wal.Append(network.OpEcho, key2, val2)
+	_ = wal.Append(network.OpPut, key1, val1)
+	_ = wal.Append(network.OpPut, key2, val2)
 
-	// Wait for background syncer to flush
+	// Wait for background syncer to fsync (mechanical sympathy test)
 	time.Sleep(50 * time.Millisecond)
 
 	err = wal.Close()
@@ -39,7 +41,7 @@ func TestWAL_AppendAndRecover(t *testing.T) {
 		t.Fatalf("failed to recover WAL: %v", err)
 	}
 
-	// Verify MemTable
+	// Verify MemTable lock-free reconstruction
 	gotVal1, ok := mt.Get(key1)
 	if !ok || !bytes.Equal(gotVal1, val1) {
 		t.Errorf("expected val1, got %s", string(gotVal1))
@@ -50,6 +52,8 @@ func TestWAL_AppendAndRecover(t *testing.T) {
 	}
 }
 
+// TestWAL_CorruptionRecovery proves that torn writes (simulated by byte flipping)
+// are safely detected via CRC checksums, halting recovery cleanly without panicking.
 func TestWAL_CorruptionRecovery(t *testing.T) {
 	tempDir := t.TempDir()
 	walPath := filepath.Join(tempDir, "corrupt.wal")
@@ -60,37 +64,32 @@ func TestWAL_CorruptionRecovery(t *testing.T) {
 	}
 
 	key, val := []byte("corrupt_key"), []byte("corrupt_val")
-	_ = wal.Append(network.OpEcho, key, val)
+	_ = wal.Append(network.OpPut, key, val)
 	
-	// Wait for background syncer to flush
 	time.Sleep(50 * time.Millisecond)
 	_ = wal.Close()
 
-	// Corrupt the file manually by flipping a byte at the end of the file
 	data, err := os.ReadFile(walPath)
 	if err != nil {
 		t.Fatalf("failed to read WAL: %v", err)
 	}
 	
-	// Flip the last byte
+	// Flip the last byte to invalidate the CRC checksum of the final record
 	data[len(data)-1] ^= 0xFF
 	
-	err = os.WriteFile(walPath, data, 0644)
-	if err != nil {
+	if err := os.WriteFile(walPath, data, 0644); err != nil {
 		t.Fatalf("failed to write corrupted WAL: %v", err)
 	}
 
 	mt := NewMemTable()
 	// Recovery should succeed but silently stop before the corrupted record 
-	// (as requested: "treat it as a torn write (EOF) and stop reading").
-	err = Recover(walPath, mt)
-	if err != nil {
-		t.Fatalf("recovery returned an error instead of stopping: %v", err)
+	// (as it is treated as a torn write / EOF).
+	if err := Recover(walPath, mt); err != nil {
+		t.Fatalf("recovery returned an error instead of stopping at EOF/Torn Write: %v", err)
 	}
 
 	// The record should NOT be in the MemTable
-	_, ok := mt.Get(key)
-	if ok {
+	if _, ok := mt.Get(key); ok {
 		t.Errorf("record should not have been recovered due to CRC mismatch")
 	}
 }

@@ -10,25 +10,35 @@ import (
 	"github.com/Forest_DatabaseEngine/internal/network"
 )
 
-// IndexEntry represents a pointer to a data block inside the SSTable.
+// SSTableMagic is the validation signature for SSTable files.
+const SSTableMagic uint32 = 0xF0E57DBB
+
+// SSTableFooterSize is the fixed byte length of the trailing metadata.
+// Layout: IndexOffset(8) + BloomOffset(8) + Magic(4) = 20 bytes
+const SSTableFooterSize = 20
+
+// IndexEntry represents a sparse index pointer mapping a key to a 4KB data block offset.
 type IndexEntry struct {
 	Key    []byte
 	Offset uint64
 }
 
 // FlushMemTable writes a frozen MemTable to an immutable, append-only SSTable file.
+// The file layout is heavily optimized for minimal disk I/O:
+// [Data Blocks] -> [Sparse Index] -> [Bloom Filter] -> [Footer]
 func FlushMemTable(mt *MemTable, filepath string) error {
-	f, err := os.OpenFile(filepath, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0644)
+	file, err := os.OpenFile(filepath, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0644)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create SSTable file %s: %w", filepath, err)
 	}
-	defer f.Close()
+	defer file.Close()
 
-	// Use a 4MB buffer to prevent excessive syscalls
-	bw := bufio.NewWriterSize(f, 4*1024*1024)
+	// Buffer syscalls to aggressively minimize write overhead.
+	bufWriter := bufio.NewWriterSize(file, 4*1024*1024)
 
 	var index []IndexEntry
 	// We size the Bloom Filter for ~4000 items (4MB / ~1KB per item) with a 1% false positive rate.
+	// This mathematically eliminates >99% of disk reads for non-existent keys.
 	bf := NewBloomFilter(4000, 0.01)
 
 	var currentOffset uint64 = 0
@@ -39,32 +49,43 @@ func FlushMemTable(mt *MemTable, filepath string) error {
 	for curr != nil {
 		key := curr.key
 		valPtr := curr.val.Load()
-		if valPtr == nil {
+		if valPtr == nil { // Nil pointer shouldn't happen by design, but we guard.
 			curr = curr.nexts[0].Load()
 			continue
 		}
 		val := *valPtr
 
-		// Add to Bloom Filter
+		// Note: We write tombstones (len(val)==0) to disk so they can shadow older values in L1+.
 		bf.Add(key)
 
-		// Create Sparse Index Entry every 4KB of data
+		// Create Sparse Index Entry roughly every 4KB of data to bound linear scan time.
 		if currentOffset-lastIndexOffset >= 4096 || currentOffset == 0 {
 			index = append(index, IndexEntry{Key: key, Offset: currentOffset})
 			lastIndexOffset = currentOffset
 		}
 
-		// Write Data Block Entry: [OpCode (1B) | KeyLen (2B) | ValLen (4B) | Key | Val]
+		// Write Data Block Entry: [OpCode(1B) | KeyLen(2B) | ValLen(4B) | Key | Val]
 		var header [7]byte
-		header[0] = byte(network.OpEcho) // We use OpEcho to signify a standard Put for this phase
+		header[0] = byte(network.OpPut) // Standardize on OpPut for disk entries.
 		binary.BigEndian.PutUint16(header[1:3], uint16(len(key)))
 		binary.BigEndian.PutUint32(header[3:7], uint32(len(val)))
 
-		n, _ := bw.Write(header[:])
+		n, err := bufWriter.Write(header[:])
+		if err != nil {
+			return fmt.Errorf("failed to write header: %w", err)
+		}
 		currentOffset += uint64(n)
-		n, _ = bw.Write(key)
+		
+		n, err = bufWriter.Write(key)
+		if err != nil {
+			return fmt.Errorf("failed to write key: %w", err)
+		}
 		currentOffset += uint64(n)
-		n, _ = bw.Write(val)
+		
+		n, err = bufWriter.Write(val)
+		if err != nil {
+			return fmt.Errorf("failed to write value: %w", err)
+		}
 		currentOffset += uint64(n)
 
 		curr = curr.nexts[0].Load()
@@ -76,16 +97,22 @@ func FlushMemTable(mt *MemTable, filepath string) error {
 	// NumIndexEntries (4B)
 	var countBuf [4]byte
 	binary.BigEndian.PutUint32(countBuf[:], uint32(len(index)))
-	n, _ := bw.Write(countBuf[:])
+	n, err := bufWriter.Write(countBuf[:])
+	if err != nil {
+		return fmt.Errorf("failed to write index count: %w", err)
+	}
 	currentOffset += uint64(n)
 	
 	for _, entry := range index {
 		var idxHeader [10]byte // KeyLen(2) + Offset(8)
 		binary.BigEndian.PutUint16(idxHeader[0:2], uint16(len(entry.Key)))
 		binary.BigEndian.PutUint64(idxHeader[2:10], entry.Offset)
-		n1, _ := bw.Write(idxHeader[0:2])
-		n2, _ := bw.Write(entry.Key)
-		n3, _ := bw.Write(idxHeader[2:10])
+		n1, err := bufWriter.Write(idxHeader[0:2])
+		if err != nil { return fmt.Errorf("failed to write index header: %w", err) }
+		n2, err := bufWriter.Write(entry.Key)
+		if err != nil { return fmt.Errorf("failed to write index key: %w", err) }
+		n3, err := bufWriter.Write(idxHeader[2:10])
+		if err != nil { return fmt.Errorf("failed to write index offset: %w", err) }
 		currentOffset += uint64(n1 + n2 + n3)
 	}
 
@@ -93,64 +120,75 @@ func FlushMemTable(mt *MemTable, filepath string) error {
 
 	// 3. Write Bloom Filter
 	bloomData := bf.Encode()
-	bw.Write(bloomData)
-
-	// 4. Write Footer (Fixed 20 bytes)
-	var footer [20]byte
-	binary.BigEndian.PutUint64(footer[0:8], indexBlockOffset)
-	binary.BigEndian.PutUint64(footer[8:16], bloomFilterOffset)
-	binary.BigEndian.PutUint32(footer[16:20], 0xF0E57DBB) // Magic Number
-	bw.Write(footer[:])
-
-	// Flush bufio to disk
-	if err := bw.Flush(); err != nil {
-		return err
+	if _, err := bufWriter.Write(bloomData); err != nil {
+		return fmt.Errorf("failed to write bloom filter: %w", err)
 	}
 
-	// Final fsync
-	return f.Sync()
+	// 4. Write Footer (Fixed Size)
+	var footer [SSTableFooterSize]byte
+	binary.BigEndian.PutUint64(footer[0:8], indexBlockOffset)
+	binary.BigEndian.PutUint64(footer[8:16], bloomFilterOffset)
+	binary.BigEndian.PutUint32(footer[16:20], SSTableMagic)
+	if _, err := bufWriter.Write(footer[:]); err != nil {
+		return fmt.Errorf("failed to write footer: %w", err)
+	}
+
+	// Flush bufio to disk
+	if err := bufWriter.Flush(); err != nil {
+		return fmt.Errorf("failed to flush SSTable buffers: %w", err)
+	}
+
+	// Final fsync guarantees durability before updating the manifest.
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("failed to fsync SSTable: %w", err)
+	}
+	return nil
 }
 
 // ReadSSTable performs a point lookup for a key in the SSTable file.
+// It aggressively avoids disk I/O by checking the Bloom Filter first.
 func ReadSSTable(filepath string, searchKey []byte) ([]byte, bool, error) {
-	f, err := os.Open(filepath)
+	file, err := os.Open(filepath)
 	if err != nil {
-		return nil, false, err
+		return nil, false, fmt.Errorf("failed to open SSTable for read: %w", err)
 	}
-	defer f.Close()
+	defer file.Close()
 
-	stat, err := f.Stat()
+	stat, err := file.Stat()
 	if err != nil {
-		return nil, false, err
+		return nil, false, fmt.Errorf("failed to stat SSTable: %w", err)
 	}
 
-	if stat.Size() < 20 {
-		return nil, false, fmt.Errorf("file too small")
+	if stat.Size() < SSTableFooterSize {
+		return nil, false, fmt.Errorf("SSTable %s is too small (corrupt)", filepath)
 	}
 
 	// 1. Read Footer
-	var footer [20]byte
-	if _, err := f.ReadAt(footer[:], stat.Size()-20); err != nil {
-		return nil, false, err
+	var footer [SSTableFooterSize]byte
+	if _, err := file.ReadAt(footer[:], stat.Size()-SSTableFooterSize); err != nil {
+		return nil, false, fmt.Errorf("failed to read SSTable footer: %w", err)
 	}
 
 	magic := binary.BigEndian.Uint32(footer[16:20])
-	if magic != 0xF0E57DBB {
-		return nil, false, fmt.Errorf("invalid SSTable magic number")
+	if magic != SSTableMagic {
+		return nil, false, fmt.Errorf("invalid SSTable magic number: expected %X, got %X", SSTableMagic, magic)
 	}
 
 	indexOffset := binary.BigEndian.Uint64(footer[0:8])
 	bloomOffset := binary.BigEndian.Uint64(footer[8:16])
 
 	// 2. Read Bloom Filter
-	bloomLen := stat.Size() - 20 - int64(bloomOffset)
+	bloomLen := stat.Size() - SSTableFooterSize - int64(bloomOffset)
 	bloomData := make([]byte, bloomLen)
-	if _, err := f.ReadAt(bloomData, int64(bloomOffset)); err != nil {
-		return nil, false, err
+	if _, err := file.ReadAt(bloomData, int64(bloomOffset)); err != nil {
+		return nil, false, fmt.Errorf("failed to read Bloom filter: %w", err)
 	}
 
-	bf := DecodeBloomFilter(bloomData)
-	if bf == nil || !bf.Contains(searchKey) {
+	bf, err := DecodeBloomFilter(bloomData)
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to decode Bloom filter: %w", err)
+	}
+	if !bf.Contains(searchKey) {
 		// Bloom filter says NO - skip reading the data blocks entirely!
 		return nil, false, nil
 	}
@@ -158,12 +196,12 @@ func ReadSSTable(filepath string, searchKey []byte) ([]byte, bool, error) {
 	// 3. Read Sparse Index
 	indexLen := bloomOffset - indexOffset
 	indexData := make([]byte, indexLen)
-	if _, err := f.ReadAt(indexData, int64(indexOffset)); err != nil {
-		return nil, false, err
+	if _, err := file.ReadAt(indexData, int64(indexOffset)); err != nil {
+		return nil, false, fmt.Errorf("failed to read Sparse Index: %w", err)
 	}
 
 	if len(indexData) < 4 {
-		return nil, false, fmt.Errorf("invalid index block")
+		return nil, false, fmt.Errorf("invalid sparse index block size")
 	}
 
 	numEntries := binary.BigEndian.Uint32(indexData[0:4])
@@ -197,8 +235,8 @@ func ReadSSTable(filepath string, searchKey []byte) ([]byte, bool, error) {
 
 	// 4. Read Data Block
 	if blockOffset == 0 && numEntries > 0 {
-		// We are looking for a key smaller than the very first key in the index
-		// This means it doesn't exist.
+		// We are looking for a key smaller than the very first key in the index.
+		// Because the SSTable is sorted, this means the key definitely does not exist.
 		firstKeyLen := binary.BigEndian.Uint16(indexData[4:6])
 		firstKey := indexData[6 : 6+firstKeyLen]
 		if bytes.Compare(firstKey, searchKey) > 0 {
@@ -208,8 +246,8 @@ func ReadSSTable(filepath string, searchKey []byte) ([]byte, bool, error) {
 
 	blockLen := nextBlockOffset - blockOffset
 	blockData := make([]byte, blockLen)
-	if _, err := f.ReadAt(blockData, int64(blockOffset)); err != nil {
-		return nil, false, err
+	if _, err := file.ReadAt(blockData, int64(blockOffset)); err != nil {
+		return nil, false, fmt.Errorf("failed to read Data Block: %w", err)
 	}
 
 	// 5. Linear scan within the 4KB block
@@ -229,7 +267,7 @@ func ReadSSTable(filepath string, searchKey []byte) ([]byte, bool, error) {
 		if cmp == 0 {
 			return currVal, true, nil
 		} else if cmp > 0 {
-			// Because it's sorted, if we pass it, it's not here.
+			// Because the block is sorted, if we pass the target key, it's not here.
 			break
 		}
 		

@@ -12,9 +12,9 @@ func TestMemTable_BasicOperations(t *testing.T) {
 	mt := NewMemTable()
 
 	// Put some keys
-	mt.Put([]byte("apple"), []byte("red"))
-	mt.Put([]byte("banana"), []byte("yellow"))
-	mt.Put([]byte("cherry"), []byte("red"))
+	_ = mt.Put([]byte("apple"), []byte("red"))
+	_ = mt.Put([]byte("banana"), []byte("yellow"))
+	_ = mt.Put([]byte("cherry"), []byte("red"))
 
 	// Get existing keys
 	val, ok := mt.Get([]byte("apple"))
@@ -34,7 +34,7 @@ func TestMemTable_BasicOperations(t *testing.T) {
 	}
 
 	// Update existing key
-	mt.Put([]byte("apple"), []byte("green"))
+	_ = mt.Put([]byte("apple"), []byte("green"))
 	val, ok = mt.Get([]byte("apple"))
 	if !ok || string(val) != "green" {
 		t.Errorf("expected apple=green, got %s", string(val))
@@ -45,11 +45,11 @@ func TestMemTable_SortedOrder(t *testing.T) {
 	mt := NewMemTable()
 	
 	// Insert in reverse order
-	mt.Put([]byte("e"), []byte("5"))
-	mt.Put([]byte("d"), []byte("4"))
-	mt.Put([]byte("c"), []byte("3"))
-	mt.Put([]byte("b"), []byte("2"))
-	mt.Put([]byte("a"), []byte("1"))
+	_ = mt.Put([]byte("e"), []byte("5"))
+	_ = mt.Put([]byte("d"), []byte("4"))
+	_ = mt.Put([]byte("c"), []byte("3"))
+	_ = mt.Put([]byte("b"), []byte("2"))
+	_ = mt.Put([]byte("a"), []byte("1"))
 
 	// Traverse level 0 and ensure sorted order
 	curr := mt.head.nexts[0].Load()
@@ -91,7 +91,7 @@ func TestMemTable_Concurrency(t *testing.T) {
 
 					// Randomly Put or Get
 					if rand.Float32() < 0.5 {
-						mt.Put(key, val)
+						_ = mt.Put(key, val)
 					} else {
 						mt.Get(key)
 					}

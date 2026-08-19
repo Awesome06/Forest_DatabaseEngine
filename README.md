@@ -28,6 +28,12 @@ BenchmarkParseHeader-16   206667542   5.822 ns/op   0 B/op   0 allocs/op
 ```
 *Result: `5.8ns` parsing latency with **zero heap allocations** per request, allowing the engine to sustain massive throughput without triggering GC pauses.*
 
+**CPU Profiling (pprof):**
+
+![CPU Flame Graph proving zero GC overhead and async WAL syncing](./assets/cpu-flamegraph.png)
+
+*The flame graph above demonstrates the engine under heavy concurrent write load. Notice the complete absence of `mallocgc` (Garbage Collection) blocks on the TCP read/write paths, and the heavily isolated `engine.(*WAL).syncLoop` handling disk persistence entirely asynchronously.*
+
 ---
 
 ## System Architecture
@@ -82,8 +88,8 @@ Forest is built to survive catastrophic failure. You can run the Chaos Engineeri
 This script compiles the server, blasts it with concurrent writes, abruptly kills the process, and validates that the WAL recovers 100% of the acknowledged data on reboot.
 
 ```bash
-git clone [https://github.com/Awesome06/forest.git](https://github.com/Awesome06/forest.git)
-cd forest
+git clone [https://github.com/Awesome06/Forest_DatabaseEngine.git](https://github.com/Awesome06/Forest_DatabaseEngine.git)
+cd Forest_DatabaseEngine
 chmod +x ./scripts/chaos_test.sh
 ./scripts/chaos_test.sh
 ```
