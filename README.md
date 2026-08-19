@@ -25,9 +25,9 @@ goos: windows / linux
 goarch: amd64
 pkg: [github.com/Forest_DatabaseEngine/internal/network](https://github.com/Forest_DatabaseEngine/internal/network)
 cpu: 13th Gen Intel(R) Core(TM) i5-13450HX
-BenchmarkParseHeader-16   206667542   5.822 ns/op   0 B/op   0 allocs/op
+BenchmarkParseHeader-16         206164630                 5.782 ns/op           0 B/op          0 allocs/op
 ```
-*Result: `5.8ns` parsing latency with **zero heap allocations** per request, allowing the engine to sustain massive throughput without triggering GC pauses.*
+*Result: `5.78ns` parsing latency with **zero heap allocations** per request, allowing the engine to sustain massive throughput without triggering GC pauses.*
 
 **CPU Profiling (pprof):**
 
