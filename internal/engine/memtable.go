@@ -67,6 +67,12 @@ func (m *MemTable) Put(key, val []byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// Re-check frozen status under lock in case a concurrent CheckFlush froze it
+	// while we were waiting for m.mu.Lock().
+	if m.frozen.Load() {
+		return errors.New("memtable is frozen")
+	}
+
 	var preds [maxLevel]*Node
 	curr := m.head
 
@@ -102,8 +108,12 @@ func (m *MemTable) Put(key, val []byte) error {
 
 	// Key does not exist: create a new node and determine its height.
 	level := randomLevel()
+	
+	keyCopy := make([]byte, len(key))
+	copy(keyCopy, key)
+	
 	newNode := &Node{
-		key: key,
+		key: keyCopy,
 	}
 
 	var newVal []byte
@@ -180,4 +190,12 @@ func (m *MemTable) Get(key []byte) ([]byte, bool) {
 // It is used by the Engine to trigger background SSTable flushes.
 func (m *MemTable) Size() int64 {
 	return m.size.Load()
+}
+
+// Freeze marks the MemTable as immutable. It acquires the write lock to ensure
+// all in-flight writers have completed their inserts before it returns.
+func (m *MemTable) Freeze() {
+	m.mu.Lock()
+	m.frozen.Store(true)
+	m.mu.Unlock()
 }

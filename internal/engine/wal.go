@@ -177,9 +177,9 @@ func Recover(filepath string, mt *MemTable) error {
 
 		// Apply the recovered state to the MemTable.
 		if op == network.OpDelete {
-			mt.Put(key, nil) // Tombstone for delete
+			_ = mt.Put(key, nil) // Tombstone for delete (error is impossible, table not frozen)
 		} else {
-			mt.Put(key, val) // Echo or Put
+			_ = mt.Put(key, val) // Echo or Put (error is impossible, table not frozen)
 		}
 	}
 }

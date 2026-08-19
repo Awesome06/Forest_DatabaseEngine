@@ -221,28 +221,38 @@ func finalizeSSTable(file *os.File, bufWriter *bufio.Writer, bf *BloomFilter, in
 
 	var countBuf [4]byte
 	binary.BigEndian.PutUint32(countBuf[:], uint32(len(index)))
-	n, _ := bufWriter.Write(countBuf[:])
+	n, err := bufWriter.Write(countBuf[:])
+	if err != nil {
+		return fmt.Errorf("failed to write index count: %w", err)
+	}
 	currentOffset += uint64(n)
 	
 	for _, entry := range index {
 		var idxHeader [10]byte 
 		binary.BigEndian.PutUint16(idxHeader[0:2], uint16(len(entry.Key)))
 		binary.BigEndian.PutUint64(idxHeader[2:10], entry.Offset)
-		n1, _ := bufWriter.Write(idxHeader[0:2])
-		n2, _ := bufWriter.Write(entry.Key)
-		n3, _ := bufWriter.Write(idxHeader[2:10])
+		n1, err := bufWriter.Write(idxHeader[0:2])
+		if err != nil { return fmt.Errorf("failed to write index header: %w", err) }
+		n2, err := bufWriter.Write(entry.Key)
+		if err != nil { return fmt.Errorf("failed to write index key: %w", err) }
+		n3, err := bufWriter.Write(idxHeader[2:10])
+		if err != nil { return fmt.Errorf("failed to write index offset: %w", err) }
 		currentOffset += uint64(n1 + n2 + n3)
 	}
 
 	bloomFilterOffset := currentOffset
 	bloomData := bf.Encode()
-	bufWriter.Write(bloomData)
+	if _, err := bufWriter.Write(bloomData); err != nil {
+		return fmt.Errorf("failed to write bloom filter: %w", err)
+	}
 
 	var footer [SSTableFooterSize]byte
 	binary.BigEndian.PutUint64(footer[0:8], indexBlockOffset)
 	binary.BigEndian.PutUint64(footer[8:16], bloomFilterOffset)
 	binary.BigEndian.PutUint32(footer[16:20], SSTableMagic)
-	bufWriter.Write(footer[:])
+	if _, err := bufWriter.Write(footer[:]); err != nil {
+		return fmt.Errorf("failed to write footer: %w", err)
+	}
 
 	if err := bufWriter.Flush(); err != nil {
 		return err

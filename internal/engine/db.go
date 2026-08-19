@@ -190,7 +190,8 @@ func (db *DB) CheckFlush() {
 		return
 	}
 
-	active.frozen.Store(true)
+	// Drain in-flight writers and mark the active table as frozen.
+	active.Freeze()
 
 	// Atomically rotate the MemTables.
 	db.immutableMT.Store(active)

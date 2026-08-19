@@ -125,7 +125,7 @@ func DecodeBloomFilter(data []byte) (*BloomFilter, error) {
 	offset := 9
 	for i := 0; i < int(numUint64s); i++ {
 		if offset+8 > len(data) {
-			break // Allow partial reads in case of corruption padding.
+			return nil, fmt.Errorf("bloom filter data truncated: missing bytes")
 		}
 		bits[i] = binary.BigEndian.Uint64(data[offset : offset+8])
 		offset += 8
