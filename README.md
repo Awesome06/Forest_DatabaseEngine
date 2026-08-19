@@ -11,6 +11,7 @@ Most modern applications rely on high-level databases without understanding the 
 1. **Master Lock-Free Concurrency:** Eliminate mutex bottlenecks using atomic pointer swaps in a custom SkipList.
 2. **Defeat Garbage Collection:** Prove that Go can handle extreme network throughput without stop-the-world GC pauses by engineering a zero-allocation hot path.
 3. **Understand Disk I/O:** Implement Read-Copy-Update (RCU) file manifests and background compaction to manage disk fragmentation mathematically.
+4. **Uncompromising Safety:** Ensure production-grade durability by wrapping all disk I/O errors, strictly bounds-checking network payloads, and utilizing CompareAndSwap to eliminate TOCTOU vulnerabilities during background garbage collection.
 
 ---
 
@@ -59,6 +60,7 @@ graph TD
 *   **Crash-Safe Durability:** Implements Write-Ahead Logging (WAL) with double-buffering. Ensures zero data loss up to the last network ACK.
 *   **Disk-Optimized SSTables:** Append-only Sorted String Tables featuring integrated custom Bloom Filters (bit arrays) to mathematically eliminate disk reads for non-existent keys.
 *   **RCU Compaction:** A dedicated background worker pool merges Level-0 files into sorted Level-1 files asynchronously. Uses Read-Copy-Update (RCU) reference counting so TCP reads never block during file deletions.
+*   **Production-Grade Resilience:** The engine is hardened against Time-Of-Check to Time-Of-Update (TOCTOU) vulnerabilities during manifest swaps via lock-free `CompareAndSwap` routines. Strict error wrapping ensures complete observability without silent failures.
 
 ---
 
