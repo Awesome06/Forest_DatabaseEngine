@@ -7,31 +7,44 @@ import (
 	"sync/atomic"
 )
 
+// maxLevel defines the maximum height of the SkipList.
+// 16 is mathematically sufficient for up to 2^16 elements with a branching factor of 0.5.
+// For p=0.25, it comfortably supports standard 4MB MemTable capacities.
 const maxLevel = 16
 
-// Node represents a node in the lock-free SkipList MemTable.
+// Node represents a single key-value entry in the lock-free SkipList.
+// Readers traverse this structure without holding any locks.
 type Node struct {
-	key   []byte
-	// val is an atomic pointer to a byte slice to allow lock-free, race-free value updates.
+	key []byte
+	// val is stored as an atomic pointer to a byte slice.
+	// This ensures that readers never observe partially updated values
+	// when a key is overwritten by a concurrent writer.
 	val   atomic.Pointer[[]byte]
+	// nexts holds the forward pointers for each level of the SkipList.
+	// They are updated atomically from bottom-to-top during insertion
+	// to guarantee lock-free readers always see a structurally valid list.
 	nexts [maxLevel]atomic.Pointer[Node]
 }
 
-// MemTable is a concurrent, lock-free SkipList (readers are lock-free).
+// MemTable is a thread-safe, lock-free SkipList serving as the active write buffer.
+// It allows single-writer serialization (via mutex) while sustaining infinite 
+// concurrent readers (via atomic pointer chasing) with zero contention.
 type MemTable struct {
 	head *Node
+	// mu serializes writers. Readers completely bypass this lock.
 	mu   sync.RWMutex
 	size atomic.Int64
 }
 
-// NewMemTable initializes an empty MemTable.
+// NewMemTable initializes and returns an empty MemTable with a dummy head node.
 func NewMemTable() *MemTable {
 	return &MemTable{
 		head: &Node{},
 	}
 }
 
-// randomLevel generates a random height for a new node.
+// randomLevel generates a randomized height for a newly inserted node.
+// It uses a geometric distribution with p=0.25 to balance search speed and memory footprint.
 func randomLevel() int {
 	level := 1
 	for level < maxLevel && rand.Float32() < 0.25 {
@@ -41,15 +54,17 @@ func randomLevel() int {
 }
 
 // Put inserts or updates a key-value pair in the MemTable.
-// It uses a mutex to serialize writers but does not block readers.
+// It locks the structure to prevent write-write conflicts but relies on atomic
+// operations so read-write conflicts are handled lock-free.
 func (m *MemTable) Put(key, val []byte) {
+	// Serialize writers to prevent structural corruption of the SkipList.
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	var preds [maxLevel]*Node
 	curr := m.head
 
-	// Traverse to find the predecessors at each level
+	// Traverse from the top level down, recording the predecessor node at each level.
 	for i := maxLevel - 1; i >= 0; i-- {
 		for {
 			next := curr.nexts[i].Load()
@@ -62,72 +77,87 @@ func (m *MemTable) Put(key, val []byte) {
 		preds[i] = curr
 	}
 
-	// Check if the key already exists
 	next := preds[0].nexts[0].Load()
 	if next != nil && bytes.Equal(next.key, key) {
-		// Key exists: atomically update the value to prevent races with lock-free readers.
-		// Note: This does not update the approximate size for the new/old value difference
-		// for simplicity in this phase.
-		newVal := make([]byte, len(val))
-		copy(newVal, val)
+		// Key already exists: we only need to update the value.
+		// By doing an atomic pointer swap, active readers will either see the old
+		// value or the new one, but never corrupted memory.
+		var newVal []byte
+		if val != nil {
+			newVal = make([]byte, len(val))
+			copy(newVal, val)
+		}
 		next.val.Store(&newVal)
+		
+		// Note: Approximate size is not adjusted on updates to avoid heavy calculation 
+		// on the hot path. The 4MB threshold is a soft limit.
 		return
 	}
 
-	// Create new node
+	// Key does not exist: create a new node and determine its height.
 	level := randomLevel()
 	newNode := &Node{
 		key: key,
 	}
-	newVal := make([]byte, len(val))
-	copy(newVal, val)
+
+	var newVal []byte
+	if val != nil {
+		newVal = make([]byte, len(val))
+		copy(newVal, val)
+	}
 	newNode.val.Store(&newVal)
 
-	// Increment size (key + val)
+	// Increment approximate memory size (useful for flush triggers).
 	m.size.Add(int64(len(key) + len(val)))
 
-	// Wire the new node to the next nodes
+	// Wire the new node's forward pointers to the existing nodes.
+	// This step is completely invisible to readers since newNode is not yet linked.
 	for i := 0; i < level; i++ {
 		newNode.nexts[i].Store(preds[i].nexts[i].Load())
 	}
 
-	// Atomically swap the predecessor's next pointers from bottom to top.
-	// This ensures lock-free readers traversing from top-to-bottom or left-to-right
-	// will see a fully linked node if they encounter it.
+	// Publish the new node to readers by atomically swapping the predecessors' pointers.
+	// We MUST link from bottom (Level 0) to top. If a reader finds the node at a higher level,
+	// it will inevitably drop down and expect the lower levels to be linked as well.
 	for i := 0; i < level; i++ {
 		preds[i].nexts[i].Store(newNode)
 	}
 }
 
-// Get performs a lock-free search for a key in the MemTable.
+// Get performs a lock-free search across the SkipList.
+// It returns the value and a boolean indicating if the key was found.
+// A nil/empty value with true indicates a tombstone (deleted key).
 func (m *MemTable) Get(key []byte) ([]byte, bool) {
 	curr := m.head
 
-	// Traverse lock-free from top to bottom
+	// Traverse lock-free from top to bottom.
 	for i := maxLevel - 1; i >= 0; i-- {
 		for {
 			next := curr.nexts[i].Load()
 			if next == nil {
 				break
 			}
+			
 			cmp := bytes.Compare(next.key, key)
 			if cmp < 0 {
+				// Move right if the next key is smaller than our target.
 				curr = next
 			} else if cmp == 0 {
-				// Exact match found
+				// Exact match found. Load the atomic value pointer.
 				valPtr := next.val.Load()
 				if valPtr != nil {
 					return *valPtr, true
 				}
+				// Failsafe (should never happen by design)
 				return nil, false
 			} else {
-				// next.key > key, drop down a level
+				// next.key > target key, drop down one level.
 				break
 			}
 		}
 	}
 
-	// Check the level 0 next node just in case
+	// Check the base level (Level 0) next node just in case we overshot.
 	next := curr.nexts[0].Load()
 	if next != nil && bytes.Equal(next.key, key) {
 		valPtr := next.val.Load()
@@ -136,10 +166,11 @@ func (m *MemTable) Get(key []byte) ([]byte, bool) {
 		}
 	}
 
-	return nil, false
+	return nil, false // Key truly not found
 }
 
-// Size returns the approximate byte size of the MemTable.
+// Size returns the approximate memory footprint of the MemTable in bytes.
+// It is used by the Engine to trigger background SSTable flushes.
 func (m *MemTable) Size() int64 {
 	return m.size.Load()
 }
