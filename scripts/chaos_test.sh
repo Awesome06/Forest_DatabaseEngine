@@ -39,7 +39,7 @@ func main() {
 		val := []byte(fmt.Sprintf("val-%d", i))
 		
 		var header [8]byte
-		header[0] = 0xFE
+		header[0] = 0xA1 // MagicByte
 		header[1] = 0x02 // OpPut
 		binary.BigEndian.PutUint16(header[2:4], uint16(len(key)))
 		binary.BigEndian.PutUint32(header[4:8], uint32(len(val)))
@@ -92,7 +92,7 @@ func main() {
 	key := []byte("key-0") // Assuming key-0 was written before kill
 	
 	var header [8]byte
-	header[0] = 0xFE
+	header[0] = 0xA1 // MagicByte
 	header[1] = 0x03 // OpGet
 	binary.BigEndian.PutUint16(header[2:4], uint16(len(key)))
 	binary.BigEndian.PutUint32(header[4:8], 0)

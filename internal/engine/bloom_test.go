@@ -63,10 +63,13 @@ func TestBloomFilter_EncodeDecode(t *testing.T) {
 	bf.Add([]byte("test_key"))
 
 	encoded := bf.Encode()
-	decoded := DecodeBloomFilter(encoded)
+	decoded, err := DecodeBloomFilter(encoded)
 
+	if err != nil {
+		t.Fatalf("failed to decode bloom filter: %v", err)
+	}
 	if decoded == nil {
-		t.Fatalf("failed to decode bloom filter")
+		t.Fatalf("failed to decode bloom filter: returned nil without error")
 	}
 	if decoded.k != bf.k {
 		t.Errorf("k mismatch: got %d, want %d", decoded.k, bf.k)
