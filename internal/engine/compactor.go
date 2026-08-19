@@ -130,7 +130,11 @@ func CompactL0toL1(l0Files []string, l1Filepath string) error {
 		// Note: We intentionally write tombstones (OpDelete) into L1 so they can continue 
 		// to shadow values in L2+ if multi-level compaction is implemented later.
 		if !bytes.Equal(lastKey, item.Key) {
-			currentOffset, lastIndexOffset = writeSSTableEntry(bufWriter, bf, &index, currentOffset, lastIndexOffset, item)
+			var err error
+			currentOffset, lastIndexOffset, err = writeSSTableEntry(bufWriter, bf, &index, currentOffset, lastIndexOffset, item)
+			if err != nil {
+				return fmt.Errorf("compaction failed to write entry: %w", err)
+			}
 			lastKey = append([]byte(nil), item.Key...) // copy to avoid memory aliasing
 		}
 
@@ -177,7 +181,7 @@ func initSSTableWriter(file *os.File) (*bufio.Writer, *BloomFilter, []IndexEntry
 }
 
 // writeSSTableEntry serializes a single merged record into the data block phase of the SSTable.
-func writeSSTableEntry(bufWriter *bufio.Writer, bf *BloomFilter, index *[]IndexEntry, currentOffset, lastIndexOffset uint64, item HeapItem) (uint64, uint64) {
+func writeSSTableEntry(bufWriter *bufio.Writer, bf *BloomFilter, index *[]IndexEntry, currentOffset, lastIndexOffset uint64, item HeapItem) (uint64, uint64, error) {
 	bf.Add(item.Key)
 	
 	if currentOffset-lastIndexOffset >= 4096 || currentOffset == 0 {
@@ -190,14 +194,25 @@ func writeSSTableEntry(bufWriter *bufio.Writer, bf *BloomFilter, index *[]IndexE
 	binary.BigEndian.PutUint16(header[1:3], uint16(len(item.Key)))
 	binary.BigEndian.PutUint32(header[3:7], uint32(len(item.Value)))
 
-	n, _ := bufWriter.Write(header[:])
+	n, err := bufWriter.Write(header[:])
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to write header: %w", err)
+	}
 	currentOffset += uint64(n)
-	n, _ = bufWriter.Write(item.Key)
+	
+	n, err = bufWriter.Write(item.Key)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to write key: %w", err)
+	}
 	currentOffset += uint64(n)
-	n, _ = bufWriter.Write(item.Value)
+	
+	n, err = bufWriter.Write(item.Value)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to write value: %w", err)
+	}
 	currentOffset += uint64(n)
 
-	return currentOffset, lastIndexOffset
+	return currentOffset, lastIndexOffset, nil
 }
 
 // finalizeSSTable appends the trailing metadata layers to seal the SSTable.

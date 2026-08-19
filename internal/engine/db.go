@@ -135,13 +135,20 @@ func (db *DB) Put(key, val []byte) error {
 		return fmt.Errorf("engine failed to append Put to WAL: %w", err)
 	}
 
-	active := db.activeMT.Load()
-	active.Put(key, val)
+	// Lock-free retry loop
+	for {
+		active := db.activeMT.Load()
+		err := active.Put(key, val)
+		if err != nil {
+			// Table was frozen by a concurrent CheckFlush, retry to get the new table
+			continue
+		}
 
-	if active.Size() >= db.flushThreshold {
-		db.CheckFlush()
+		if active.Size() >= db.flushThreshold {
+			db.CheckFlush()
+		}
+		return nil
 	}
-	return nil
 }
 
 // Delete appends a tombstone to the WAL and inserts it into the active MemTable lock-free.
@@ -150,13 +157,20 @@ func (db *DB) Delete(key []byte) error {
 		return fmt.Errorf("engine failed to append Delete to WAL: %w", err)
 	}
 
-	active := db.activeMT.Load()
-	active.Put(key, nil)
+	// Lock-free retry loop
+	for {
+		active := db.activeMT.Load()
+		err := active.Put(key, nil)
+		if err != nil {
+			// Table was frozen by a concurrent CheckFlush, retry
+			continue
+		}
 
-	if active.Size() >= db.flushThreshold {
-		db.CheckFlush()
+		if active.Size() >= db.flushThreshold {
+			db.CheckFlush()
+		}
+		return nil
 	}
-	return nil
 }
 
 // CheckFlush safely rotates the active MemTable into the flush queue if it exceeds the capacity threshold.
@@ -175,6 +189,8 @@ func (db *DB) CheckFlush() {
 		log.Println("warn: MemTable flush triggered while background flush is still active. Write delayed.")
 		return
 	}
+
+	active.frozen.Store(true)
 
 	// Atomically rotate the MemTables.
 	db.immutableMT.Store(active)

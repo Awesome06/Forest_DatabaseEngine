@@ -70,11 +70,22 @@ func FlushMemTable(mt *MemTable, filepath string) error {
 		binary.BigEndian.PutUint16(header[1:3], uint16(len(key)))
 		binary.BigEndian.PutUint32(header[3:7], uint32(len(val)))
 
-		n, _ := bufWriter.Write(header[:])
+		n, err := bufWriter.Write(header[:])
+		if err != nil {
+			return fmt.Errorf("failed to write header: %w", err)
+		}
 		currentOffset += uint64(n)
-		n, _ = bufWriter.Write(key)
+		
+		n, err = bufWriter.Write(key)
+		if err != nil {
+			return fmt.Errorf("failed to write key: %w", err)
+		}
 		currentOffset += uint64(n)
-		n, _ = bufWriter.Write(val)
+		
+		n, err = bufWriter.Write(val)
+		if err != nil {
+			return fmt.Errorf("failed to write value: %w", err)
+		}
 		currentOffset += uint64(n)
 
 		curr = curr.nexts[0].Load()

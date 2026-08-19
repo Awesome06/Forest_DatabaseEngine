@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bytes"
+	"errors"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -34,6 +35,7 @@ type MemTable struct {
 	// mu serializes writers. Readers completely bypass this lock.
 	mu   sync.RWMutex
 	size atomic.Int64
+	frozen atomic.Bool
 }
 
 // NewMemTable initializes and returns an empty MemTable with a dummy head node.
@@ -56,7 +58,11 @@ func randomLevel() int {
 // Put inserts or updates a key-value pair in the MemTable.
 // It locks the structure to prevent write-write conflicts but relies on atomic
 // operations so read-write conflicts are handled lock-free.
-func (m *MemTable) Put(key, val []byte) {
+func (m *MemTable) Put(key, val []byte) error {
+	if m.frozen.Load() {
+		return errors.New("memtable is frozen")
+	}
+
 	// Serialize writers to prevent structural corruption of the SkipList.
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -91,7 +97,7 @@ func (m *MemTable) Put(key, val []byte) {
 		
 		// Note: Approximate size is not adjusted on updates to avoid heavy calculation 
 		// on the hot path. The 4MB threshold is a soft limit.
-		return
+		return nil
 	}
 
 	// Key does not exist: create a new node and determine its height.
@@ -122,6 +128,7 @@ func (m *MemTable) Put(key, val []byte) {
 	for i := 0; i < level; i++ {
 		preds[i].nexts[i].Store(newNode)
 	}
+	return nil
 }
 
 // Get performs a lock-free search across the SkipList.

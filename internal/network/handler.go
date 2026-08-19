@@ -12,6 +12,11 @@ import (
 func HandleRequest(conn net.Conn, header RequestHeader, payloadBuf []byte, db Storage) error {
 	totalLen := int(header.KeyLen) + int(header.ValueLen)
 	
+	// Add this explicit bounds check
+	if totalLen > len(payloadBuf) {
+		return fmt.Errorf("protocol error: payload length %d exceeds buffer capacity %d", totalLen, len(payloadBuf))
+	}
+	
 	// Read the variable length payload directly into the pre-allocated buffer
 	if totalLen > 0 {
 		if _, err := io.ReadFull(conn, payloadBuf[:totalLen]); err != nil {
