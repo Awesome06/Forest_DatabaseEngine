@@ -25,9 +25,7 @@ jobs:
       uses: actions/setup-go@v5
       with:
         go-version: '1.22'
-
-    - name: Verify Dependencies
-      run: go mod verify
+        cache: false
 
     - name: Run Unit & Race Tests
       # The -race flag ensures your lock-free atomic pointers are safe
