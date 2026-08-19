@@ -162,7 +162,13 @@ func CompactL0toL1(l0Files []string, l1Filepath string) error {
 // are referencing the file before the OS unlinks it.
 func PurgeObsoleteFiles(v *Version, files []string) {
 	// Wait until all active readers that acquired this version have released it.
-	for v.Refs.Load() > 0 {
+	for {
+		refs := v.Refs.Load()
+		if refs == 0 {
+			if v.Refs.CompareAndSwap(0, -1) {
+				break
+			}
+		}
 		time.Sleep(10 * time.Millisecond)
 	}
 
@@ -255,7 +261,10 @@ func finalizeSSTable(file *os.File, bufWriter *bufio.Writer, bf *BloomFilter, in
 	}
 
 	if err := bufWriter.Flush(); err != nil {
-		return err
+		return fmt.Errorf("failed to flush buffer: %w", err)
 	}
-	return file.Sync()
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("failed to fsync file: %w", err)
+	}
+	return nil
 }

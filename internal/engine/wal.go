@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"log"
 	"os"
 	"sync"
 	"time"
@@ -112,7 +113,9 @@ func (w *WAL) flush() {
 
 	if err == nil {
 		// Sync is called outside the mutex so disk I/O latency does not block active Appends.
-		_ = w.file.Sync()
+		if syncErr := w.file.Sync(); syncErr != nil {
+			log.Printf("critical: failed to fsync WAL: %v", syncErr)
+		}
 	}
 }
 
@@ -177,9 +180,13 @@ func Recover(filepath string, mt *MemTable) error {
 
 		// Apply the recovered state to the MemTable.
 		if op == network.OpDelete {
-			_ = mt.Put(key, nil) // Tombstone for delete (error is impossible, table not frozen)
+			if err := mt.Put(key, nil); err != nil {
+				return fmt.Errorf("failed to put tombstone during recovery: %w", err)
+			}
 		} else {
-			_ = mt.Put(key, val) // Echo or Put (error is impossible, table not frozen)
+			if err := mt.Put(key, val); err != nil {
+				return fmt.Errorf("failed to put value during recovery: %w", err)
+			}
 		}
 	}
 }

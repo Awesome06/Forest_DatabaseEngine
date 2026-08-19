@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"sync"
 )
 
 // Server handles incoming TCP connections and routes them to the storage engine.
@@ -15,6 +16,7 @@ type Server struct {
 	addr     string
 	db       Storage
 	listener net.Listener
+	mu       sync.Mutex
 }
 
 // NewServer initializes a new TCP server bound to the given address.
@@ -33,11 +35,14 @@ func (s *Server) Start() error {
 		return fmt.Errorf("failed to bind TCP listener on %s: %w", s.addr, err)
 	}
 	
+	s.mu.Lock()
 	s.listener = listener
+	s.mu.Unlock()
+
 	log.Printf("Forest Database Engine TCP server listening on %s\n", s.addr)
 
 	for {
-		conn, err := s.listener.Accept()
+		conn, err := listener.Accept()
 		if err != nil {
 			// If the server was stopped, the listener is closed and we should gracefully exit.
 			if errors.Is(err, net.ErrClosed) || isClosedNetworkError(err) {
@@ -62,10 +67,14 @@ func isClosedNetworkError(err error) bool {
 
 // Stop closes the active TCP listener, signaling the Start loop to exit gracefully.
 func (s *Server) Stop() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if s.listener != nil {
 		if err := s.listener.Close(); err != nil {
 			return fmt.Errorf("failed to close TCP listener: %w", err)
 		}
+		s.listener = nil
 	}
 	return nil
 }

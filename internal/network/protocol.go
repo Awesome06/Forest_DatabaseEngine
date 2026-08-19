@@ -55,7 +55,10 @@ func ParseHeader(r io.Reader, buf []byte) (RequestHeader, error) {
 
 	headerBuf := buf[:HeaderSize]
 	if _, err := io.ReadFull(r, headerBuf); err != nil {
-		return RequestHeader{}, err // Do not wrap EOF so the caller can handle client disconnects
+		if errors.Is(err, io.EOF) {
+			return RequestHeader{}, err // Do not wrap EOF so the caller can handle client disconnects
+		}
+		return RequestHeader{}, fmt.Errorf("failed to read protocol header: %w", err)
 	}
 
 	if headerBuf[0] != MagicByte {

@@ -94,8 +94,13 @@ func (db *DB) Get(key []byte) ([]byte, bool, error) {
 
 	// 3. Search RCU Version SSTables
 	// Acquire a read reference to prevent files from being deleted during read.
-	version := db.currentVersion.Load()
-	version.Acquire()
+	var version *Version
+	for {
+		version = db.currentVersion.Load()
+		if version.Acquire() {
+			break
+		}
+	}
 	defer version.Release()
 
 	// Search L0 files (newer files are appended to the end, so we search backwards)
@@ -240,7 +245,9 @@ func (db *DB) flushWorker() {
 			close(db.flushQ)
 			for mt := range db.flushQ {
 				filepath := fmt.Sprintf("data-L0-%d.sst", flushCount)
-				FlushMemTable(mt, filepath)
+				if err := FlushMemTable(mt, filepath); err != nil {
+					log.Printf("critical: failed to flush MemTable to %s during shutdown: %v", filepath, err)
+				}
 				flushCount++
 			}
 			return

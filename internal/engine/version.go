@@ -20,10 +20,17 @@ type Version struct {
 }
 
 // Acquire increments the reference count for this specific version.
-// It must be called by readers (e.g., Get operations) before they begin traversing the SSTables
-// to ensure the underlying files are not physically unlinked by a background compaction worker.
-func (v *Version) Acquire() {
-	v.Refs.Add(1)
+// It returns true if successful, or false if the version has already been marked for purge.
+func (v *Version) Acquire() bool {
+	for {
+		refs := v.Refs.Load()
+		if refs < 0 {
+			return false
+		}
+		if v.Refs.CompareAndSwap(refs, refs+1) {
+			return true
+		}
+	}
 }
 
 // Release decrements the reference count.
