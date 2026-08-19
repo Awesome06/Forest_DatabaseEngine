@@ -3,6 +3,7 @@ package network
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"reflect"
@@ -69,7 +70,7 @@ func TestParseHeader(t *testing.T) {
 				t.Errorf("ParseHeader() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
-			if tt.wantErr && tt.errType != nil && err != tt.errType {
+			if tt.wantErr && tt.errType != nil && !errors.Is(err, tt.errType) {
 				t.Errorf("ParseHeader() error = %v, want errType %v", err, tt.errType)
 			}
 			if !reflect.DeepEqual(got, tt.want) {
