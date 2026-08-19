@@ -29,10 +29,10 @@ jobs:
 
     - name: Run Unit & Race Tests
       # The -race flag ensures your lock-free atomic pointers are safe
-      # Note: We omit -race on macOS due to a known Apple dyld LC_UUID bug with the C-based race detector
+      # Note: We omit -race and set CGO_ENABLED=0 on macOS due to a known Apple dyld LC_UUID linker bug
       run: |
         if [ "$RUNNER_OS" == "macOS" ]; then
-          go test -v ./...
+          CGO_ENABLED=0 go test -v ./...
         else
           go test -v -race ./...
         fi
