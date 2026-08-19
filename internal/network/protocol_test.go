@@ -121,10 +121,15 @@ func (r *fastReader) Read(p []byte) (n int, err error) {
 	return n, nil
 }
 
+type mockStorage struct{}
+func (m *mockStorage) Put(key, val []byte) error { return nil }
+func (m *mockStorage) Get(key []byte) ([]byte, bool, error) { return nil, false, nil }
+func (m *mockStorage) Delete(key []byte) error { return nil }
+
 // TestEndToEndEcho starts the TCP server, sends an Echo request, and verifies the response.
 func TestEndToEndEcho(t *testing.T) {
 	addr := "127.0.0.1:9001"
-	srv := NewServer(addr)
+	srv := NewServer(addr, &mockStorage{})
 	go func() {
 		_ = srv.Start()
 	}()

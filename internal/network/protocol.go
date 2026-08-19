@@ -8,22 +8,17 @@ import (
 
 // MagicByte is used to identify our protocol packets.
 const MagicByte byte = 0xFE
-
-// HeaderSize is the fixed size of our protocol header:
-// Magic (1) + OpCode (1) + KeyLen (2) + ValueLen (4) = 8 bytes.
 const HeaderSize = 8
 
-// OpCode defines the operation type.
 type OpCode byte
 
 const (
-	OpEcho OpCode = 0x01
-	// OpPut    OpCode = 0x02
-	// OpGet    OpCode = 0x03
-	// OpDelete OpCode = 0x04
+	OpEcho   OpCode = 0x01
+	OpPut    OpCode = 0x02
+	OpGet    OpCode = 0x03
+	OpDelete OpCode = 0x04
 )
 
-// RequestHeader is the strictly parsed 8-byte header.
 type RequestHeader struct {
 	Op       OpCode
 	KeyLen   uint16
@@ -35,15 +30,18 @@ var (
 	ErrShortBuffer  = errors.New("provided buffer is too short for header")
 )
 
-// ParseHeader reads directly from an io.Reader into a pre-allocated buffer
-// to avoid heap allocations on the hot path. The provided buf must be at least
-// HeaderSize (8 bytes) long.
+// Storage defines the interface for the database engine to prevent cyclic dependencies.
+type Storage interface {
+	Put(key, val []byte) error
+	Get(key []byte) ([]byte, bool, error)
+	Delete(key []byte) error
+}
+
 func ParseHeader(r io.Reader, buf []byte) (RequestHeader, error) {
 	if len(buf) < HeaderSize {
 		return RequestHeader{}, ErrShortBuffer
 	}
 
-	// We only read the exact HeaderSize
 	headerBuf := buf[:HeaderSize]
 	_, err := io.ReadFull(r, headerBuf)
 	if err != nil {

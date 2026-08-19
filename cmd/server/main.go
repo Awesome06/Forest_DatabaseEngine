@@ -6,28 +6,30 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/Forest_DatabaseEngine/internal/engine"
 	"github.com/Forest_DatabaseEngine/internal/network"
 )
 
 func main() {
-	// Listen on port 9000 as agreed
-	srv := network.NewServer(":9000")
+	db, err := engine.NewDB("forest.wal")
+	if err != nil {
+		log.Fatalf("Failed to initialize engine: %v", err)
+	}
 
-	// Start server in a background goroutine
+	server := network.NewServer("127.0.0.1:9000", db)
+
+	// Handle graceful shutdown
 	go func() {
-		if err := srv.Start(); err != nil {
-			log.Fatalf("Server stopped: %v", err)
-		}
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+		<-sigChan
+		
+		log.Println("Shutting down database...")
+		db.Close()
+		os.Exit(0)
 	}()
 
-	// Wait for termination signal for graceful shutdown
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
-	<-stop
-
-	log.Println("Shutting down server...")
-	if err := srv.Stop(); err != nil {
-		log.Fatalf("Error during shutdown: %v", err)
+	if err := server.Start(); err != nil {
+		log.Fatalf("Server failed: %v", err)
 	}
-	log.Println("Server successfully stopped.")
 }

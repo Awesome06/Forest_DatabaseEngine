@@ -6,43 +6,85 @@ import (
 	"net"
 )
 
-// HandleEcho reads the payload specified by the header from the connection,
-// and immediately writes the exact same packet (header + payload) back.
-// To enforce zero-allocation on the hot path, it expects a pre-allocated payloadBuf
-// that is large enough to hold the payload.
-func HandleEcho(conn net.Conn, header RequestHeader, payloadBuf []byte) error {
-	totalLen := uint32(header.KeyLen) + header.ValueLen
-
-	if uint32(len(payloadBuf)) < totalLen {
-		return ErrShortBuffer
-	}
-
-	// Read payload directly into the provided buffer
-	payload := payloadBuf[:totalLen]
+// HandleRequest processes the TCP packet using zero-allocation strategies where possible.
+// payloadBuf is pre-allocated by the caller to avoid heap allocations on the hot path.
+func HandleRequest(conn net.Conn, header RequestHeader, payloadBuf []byte, db Storage) error {
+	totalLen := int(header.KeyLen) + int(header.ValueLen)
 	if totalLen > 0 {
-		if _, err := io.ReadFull(conn, payload); err != nil {
+		_, err := io.ReadFull(conn, payloadBuf[:totalLen])
+		if err != nil {
 			return err
 		}
 	}
 
-	// Prepare response header
-	var respHeader [HeaderSize]byte
-	respHeader[0] = MagicByte
-	respHeader[1] = byte(OpEcho)
-	binary.BigEndian.PutUint16(respHeader[2:4], header.KeyLen)
-	binary.BigEndian.PutUint32(respHeader[4:8], header.ValueLen)
+	key := payloadBuf[:header.KeyLen]
+	val := payloadBuf[header.KeyLen:totalLen]
 
-	// Write header back
-	if _, err := conn.Write(respHeader[:]); err != nil {
-		return err
-	}
+	switch header.Op {
+	case OpEcho:
+		// Echo response: [KeyLen(2B)] [ValLen(4B)] [Key] [Val]
+		// For Echo, we write directly from the payload buffer
+		var headerBuf [8]byte
+		headerBuf[0] = MagicByte
+		headerBuf[1] = byte(OpEcho)
+		binary.BigEndian.PutUint16(headerBuf[2:4], header.KeyLen)
+		binary.BigEndian.PutUint32(headerBuf[4:8], header.ValueLen)
+		
+		conn.Write(headerBuf[:])
+		if totalLen > 0 {
+			conn.Write(payloadBuf[:totalLen])
+		}
+		return nil
 
-	// Write payload back
-	if totalLen > 0 {
-		if _, err := conn.Write(payload); err != nil {
+	case OpPut:
+		if err := db.Put(key, val); err != nil {
 			return err
 		}
-	}
+		return sendAck(conn)
 
-	return nil
+	case OpGet:
+		foundVal, found, err := db.Get(key)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return sendNotFound(conn)
+		}
+		
+		// Send found value
+		var headerBuf [8]byte
+		headerBuf[0] = MagicByte
+		headerBuf[1] = byte(OpGet)
+		binary.BigEndian.PutUint16(headerBuf[2:4], header.KeyLen)
+		binary.BigEndian.PutUint32(headerBuf[4:8], uint32(len(foundVal)))
+		conn.Write(headerBuf[:])
+		conn.Write(key)
+		conn.Write(foundVal)
+		return nil
+
+	case OpDelete:
+		if err := db.Delete(key); err != nil {
+			return err
+		}
+		return sendAck(conn)
+
+	default:
+		// Unknown op code
+		return sendNotFound(conn)
+	}
+}
+
+func sendAck(conn net.Conn) error {
+	var resp [8]byte
+	resp[0] = MagicByte
+	_, err := conn.Write(resp[:])
+	return err
+}
+
+func sendNotFound(conn net.Conn) error {
+	var resp [8]byte
+	resp[0] = MagicByte
+	binary.BigEndian.PutUint16(resp[2:4], 0xFFFF)
+	_, err := conn.Write(resp[:])
+	return err
 }
