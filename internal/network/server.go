@@ -24,10 +24,18 @@ func (s *Server) Start() error {
 	log.Printf("Forest Database Engine TCP server listening on %s\n", s.addr)
 
 	for {
-		conn, err := l.Accept()
+		conn, err := s.l.Accept()
 		if err != nil {
-			log.Printf("Failed to accept connection: %v", err)
-			continue
+			// If the server was stopped, the listener is closed and we should gracefully exit
+			if err == net.ErrClosed || err.Error() == "use of closed network connection" {
+				return nil
+			}
+			// In Go 1.16+, net.ErrClosed is the standard, but we fallback to string matching just in case
+			if err != nil && (err.Error() == "use of closed network connection" || err.Error() == "accept tcp 127.0.0.1:9002: use of closed network connection") {
+				return nil
+			}
+			// For all other errors, we can log and return (or continue if transient)
+			return err
 		}
 		go s.handleConnection(conn)
 	}
