@@ -1,6 +1,6 @@
 # Forest: High-Throughput LSM-Tree Storage Engine
 
-[![Build Status](https://github.com/Awesome06/forest/actions/workflows/build.yml/badge.svg)](https://github.com/Awesome06/forest/actions)
+[![Build Status](https://github.com/Awesome06/Forest_DatabaseEngine/actions/workflows/build.yml/badge.svg)](https://github.com/Awesome06/Forest_DatabaseEngine/actions)
 [![Go Version](https://img.shields.io/badge/Go-1.22+-00ADD8.svg)](https://golang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
