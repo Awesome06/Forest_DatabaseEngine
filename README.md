@@ -15,6 +15,8 @@ Forest is a persistent, write-optimized distributed key-value store built entire
 - [Performance: Zero-Allocation Hot Path](#performance-zero-allocation-hot-path)
 - [System Architecture](#system-architecture)
 - [Core Features](#core-features)
+- [Production Observability & Grafana Dashboard](#production-observability--grafana-dashboard)
+- [Dual-Protocol Architecture & mTLS Verification](#dual-protocol-architecture--mtls-verification)
 - [Custom Binary Protocol](#custom-binary-protocol)
 - [Project Layout](#project-layout)
 
@@ -23,25 +25,36 @@ Forest is built to survive catastrophic failure. You can run the built-in Chaos 
 
 ### 1. Prerequisites
 - Go 1.22+
-- Linux/macOS recommended (Windows supported via WSL)
+- Linux/macOS or Windows (PowerShell)
 
 ### 2. Run the Chaos Test
-This script compiles the server, blasts it with concurrent writes, abruptly kills the process, and validates that the WAL recovers 100% of the acknowledged data on reboot.
+This script compiles the server, blasts it with concurrent writes, abruptly kills the process (`kill -9` / `Stop-Process -Force`), and validates that the WAL recovers 100% of the acknowledged data on reboot.
+
+**On Linux / macOS:**
 ```bash
-git clone [https://github.com/Awesome06/Forest_DatabaseEngine.git](https://github.com/Awesome06/Forest_DatabaseEngine.git)
-cd Forest_DatabaseEngine
 chmod +x ./scripts/chaos_test.sh
 ./scripts/chaos_test.sh
 ```
 
+**On Windows (PowerShell):**
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\chaos_test.ps1
+```
+
 ### 3. Run the Server Manually
 ```bash
+# Build binary
 go build -o bin/forest ./cmd/server
-# Plaintext mode:
+
+# Mode A: High-performance plaintext (TCP + UDP telemetry + Prometheus):
 ./bin/forest --port=9000 --udp-port=9001 --metrics-port=2112 --wal-dir=./data/wal --sst-dir=./data/sst
 
-# Mutual TLS (mTLS) secure mode:
-./bin/forest --port=9000 --udp-port=9001 --metrics-port=2112 --tls-cert=cert.pem --tls-key=key.pem --tls-ca=ca.pem
+# Mode B: Mutual TLS (mTLS) secure node communication:
+# 1. Generate development certificates instantly (ca.crt, server.crt/key, client.crt/key):
+./bin/forest --gen-certs
+
+# 2. Launch engine requiring strict two-way certificate authentication:
+./bin/forest --port=9000 --udp-port=9001 --metrics-port=2112 --tls-cert=server.crt --tls-key=server.key --tls-ca=ca.crt
 ```
 
 ## Design Philosophy
@@ -100,6 +113,86 @@ graph TD
 | **Crash-Safe Durability** | Implements Write-Ahead Logging (WAL) with double-buffering and CRC32 checksums. Ensures zero data loss up to the last network ACK. |
 | **Disk-Optimized SSTables** | Append-only Sorted String Tables featuring integrated custom Bloom Filters (bit arrays) to mathematically eliminate disk reads for non-existent keys. |
 | **RCU Compaction** | A dedicated background worker pool merges Level-0 files into sorted Level-1 files asynchronously using RCU reference counting. |
+
+## Production Observability & Grafana Dashboard
+
+Forest features an in-house, zero-allocation Prometheus exporter implemented entirely with the Go standard library (no third-party dependencies). It exposes RED (Rate, Errors, Duration) metrics and internal storage engine diagnostics on HTTP `GET /metrics`.
+
+### 1. Scrape Endpoint
+When the server is running with `--metrics-port=2112`, inspect live telemetry via `curl`:
+```bash
+curl http://127.0.0.1:2112/metrics
+```
+
+**Sample Prometheus Text Output:**
+```text
+# HELP forest_tcp_requests_total Total TCP database requests processed
+# TYPE forest_tcp_requests_total counter
+forest_tcp_requests_total{op="put",status="ok"} 10000
+forest_tcp_requests_total{op="get",status="ok"} 2500
+
+# HELP forest_tcp_request_latency_seconds Latency of TCP request handling
+# TYPE forest_tcp_request_latency_seconds histogram
+forest_tcp_request_latency_seconds_bucket{le="0.0001"} 9980
+forest_tcp_request_latency_seconds_bucket{le="0.0005"} 10000
+forest_tcp_request_latency_seconds_count 10000
+
+# HELP forest_wal_sync_duration_seconds Latency of Write-Ahead Log sync operations
+# TYPE forest_wal_sync_duration_seconds histogram
+forest_wal_sync_duration_seconds_bucket{le="0.001"} 142
+forest_wal_sync_duration_seconds_count 142
+
+# HELP forest_memtable_swaps_total Total MemTable freeze and swap events triggered
+# TYPE forest_memtable_swaps_total counter
+forest_memtable_swaps_total 3
+
+# HELP forest_udp_packets_total Total UDP telemetry packets received
+# TYPE forest_udp_packets_total counter
+forest_udp_packets_total 42
+
+# HELP forest_udp_drops_total Total UDP telemetry packets dropped due to corruption or queue saturation
+# TYPE forest_udp_drops_total counter
+forest_udp_drops_total 0
+
+# HELP go_goroutines Number of goroutines that currently exist.
+# TYPE go_goroutines gauge
+go_goroutines 7
+```
+
+### 2. Import Pre-Configured Grafana Dashboard
+A production-ready Grafana dashboard definition is bundled in `assets/grafana-dashboard.json`.
+To load it into your Grafana instance:
+1. Open Grafana (`http://localhost:3000`).
+2. Navigate to **Dashboards** → **New** → **Import**.
+3. Upload [`assets/grafana-dashboard.json`](assets/grafana-dashboard.json) or paste its raw JSON.
+4. Select your Prometheus data source pointed at `http://localhost:2112`.
+5. Gain instant visibility into ops/sec throughput, p99 request latencies, WAL sync durations, MemTable freeze frequencies, and UDP buffer drops.
+
+---
+
+## Dual-Protocol Architecture & mTLS Verification
+
+### 1. Loss-Tolerant UDP Telemetry
+Forest separates database mutations from ephemeral health telemetry. You can blast UDP heartbeats or telemetry datagrams to port 9001:
+```bash
+# Send a UDP Heartbeat packet (0xA1 magic byte + 0x06 OpHeartbeat + 0x0000 length)
+echo -ne '\xa1\x06\x00\x00' | nc -u -w1 127.0.0.1 9001
+```
+
+### 2. Mutual TLS (mTLS) Cluster Communication
+In production, cluster nodes authenticate each other with TLS 1.3 mutual certificates. Connect using the Go client helper:
+```go
+clientTLS, err := network.LoadClientTLSConfig("client.crt", "client.key", "ca.crt", "localhost")
+if err != nil {
+    log.Fatal(err)
+}
+
+conn, err := tls.Dial("tcp", "127.0.0.1:9000", clientTLS)
+if err != nil {
+    log.Fatal(err)
+}
+defer conn.Close()
+```
 
 ## Custom Binary Protocol
 To maximize throughput, Forest uses a strict 8-byte TCP header and a 4-byte UDP telemetry header, eliminating the parsing overhead of JSON or HTTP.

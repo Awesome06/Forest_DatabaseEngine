@@ -2,7 +2,7 @@
 
 # Build the Forest Database Engine server
 build:
-	go build -o forest_server ./cmd/server
+	go build -o bin/forest ./cmd/server
 
 # Run the standard unit test suite with race detection
 test:
@@ -11,7 +11,7 @@ test:
 
 # Run the performance benchmarks to profile zero-allocation read/write paths
 bench:
-	go test -bench=. -benchmem ./internal/network/...
+	go test -bench=. -benchmem ./...
 
 # Execute the Chaos Engineering test script
 chaos: build
@@ -19,6 +19,8 @@ chaos: build
 
 # Clean up build artifacts and database files
 clean:
-	rm -f forest_server
-	rm -f *.wal *.sst
+	rm -rf bin/ data/
+	rm -f forest_server forest_server.exe blaster* verifier*
+	rm -f *.wal *.sst *.pem *.crt *.key
 	rm -f cpu.out network.test.exe
+

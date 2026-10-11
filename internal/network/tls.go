@@ -15,6 +15,7 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -227,3 +228,98 @@ func WritePEMFiles(certFile, keyFile string, certDER []byte, privKey *ecdsa.Priv
 
 	return nil
 }
+
+// GenerateAndSaveDevCerts generates self-signed CA, server, and client certificate/key PEM files
+// in the specified directory for development, testing, and benchmarking.
+func GenerateAndSaveDevCerts(outDir string) error {
+	if err := os.MkdirAll(outDir, 0755); err != nil {
+		return fmt.Errorf("failed to create cert output directory: %w", err)
+	}
+
+	caCertPath := filepath.Join(outDir, "ca.crt")
+	caKeyPath := filepath.Join(outDir, "ca.key")
+	serverCertPath := filepath.Join(outDir, "server.crt")
+	serverKeyPath := filepath.Join(outDir, "server.key")
+	clientCertPath := filepath.Join(outDir, "client.crt")
+	clientKeyPath := filepath.Join(outDir, "client.key")
+
+	// 1. Generate Root CA
+	caPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return fmt.Errorf("failed generating CA private key: %w", err)
+	}
+
+	caTemplate := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			CommonName:   "Forest Development CA",
+			Organization: []string{"Forest Storage Engine"},
+		},
+		NotBefore:             time.Now().Add(-1 * time.Hour),
+		NotAfter:              time.Now().Add(365 * 24 * time.Hour),
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+	}
+
+	caDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, &caPriv.PublicKey, caPriv)
+	if err != nil {
+		return fmt.Errorf("failed creating CA certificate: %w", err)
+	}
+	if err := WritePEMFiles(caCertPath, caKeyPath, caDER, caPriv); err != nil {
+		return err
+	}
+
+	// 2. Generate Server Certificate
+	srvPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return fmt.Errorf("failed generating server private key: %w", err)
+	}
+
+	srvTemplate := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject: pkix.Name{
+			CommonName:   "localhost",
+			Organization: []string{"Forest Node"},
+		},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1"), net.IPv6loopback},
+		DNSNames:     []string{"localhost"},
+		NotBefore:    time.Now().Add(-1 * time.Hour),
+		NotAfter:     time.Now().Add(365 * 24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+
+	srvDER, err := x509.CreateCertificate(rand.Reader, srvTemplate, caTemplate, &srvPriv.PublicKey, caPriv)
+	if err != nil {
+		return fmt.Errorf("failed creating server certificate: %w", err)
+	}
+	if err := WritePEMFiles(serverCertPath, serverKeyPath, srvDER, srvPriv); err != nil {
+		return err
+	}
+
+	// 3. Generate Client Certificate
+	clientPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return fmt.Errorf("failed generating client private key: %w", err)
+	}
+
+	clientTemplate := &x509.Certificate{
+		SerialNumber: big.NewInt(3),
+		Subject: pkix.Name{
+			CommonName:   "forest-client-node",
+			Organization: []string{"Forest Cluster"},
+		},
+		NotBefore:    time.Now().Add(-1 * time.Hour),
+		NotAfter:     time.Now().Add(365 * 24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+
+	clientDER, err := x509.CreateCertificate(rand.Reader, clientTemplate, caTemplate, &clientPriv.PublicKey, caPriv)
+	if err != nil {
+		return fmt.Errorf("failed creating client certificate: %w", err)
+	}
+	return WritePEMFiles(clientCertPath, clientKeyPath, clientDER, clientPriv)
+}
+
