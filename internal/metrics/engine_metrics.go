@@ -10,6 +10,7 @@ type EngineMetrics struct {
 	TCPRequestsGetOk    *Counter
 	TCPRequestsDelOk    *Counter
 	TCPRequestsEchoOk   *Counter
+	TCPRequestsScanOk   *Counter
 	TCPRequestsErrors   *Counter
 	TCPParseDuration    *Histogram
 
@@ -40,6 +41,7 @@ func NewEngineMetrics() *EngineMetrics {
 		TCPRequestsGetOk:    NewCounter("forest_tcp_requests_total", "Total TCP Get requests succeeded", `cmd="get",status="ok"`),
 		TCPRequestsDelOk:    NewCounter("forest_tcp_requests_total", "Total TCP Delete requests succeeded", `cmd="delete",status="ok"`),
 		TCPRequestsEchoOk:   NewCounter("forest_tcp_requests_total", "Total TCP Echo requests succeeded", `cmd="echo",status="ok"`),
+		TCPRequestsScanOk:   NewCounter("forest_tcp_requests_total", "Total TCP Scan requests succeeded", `cmd="scan",status="ok"`),
 		TCPRequestsErrors:   NewCounter("forest_tcp_requests_total", "Total TCP requests failed", `status="error"`),
 		TCPParseDuration:    NewHistogram("forest_parse_duration_seconds", "Latency distribution of frame parsing and dispatch", nil),
 
@@ -58,6 +60,7 @@ func NewEngineMetrics() *EngineMetrics {
 	reg.RegisterCounter(em.TCPRequestsGetOk)
 	reg.RegisterCounter(em.TCPRequestsDelOk)
 	reg.RegisterCounter(em.TCPRequestsEchoOk)
+	reg.RegisterCounter(em.TCPRequestsScanOk)
 	reg.RegisterCounter(em.TCPRequestsErrors)
 	reg.RegisterHistogram(em.TCPParseDuration)
 

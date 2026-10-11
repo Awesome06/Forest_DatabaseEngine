@@ -1,43 +1,64 @@
-# Future Scope & Roadmap: ForestDB
+# Future Scope & Technical Roadmap: ForestDB
 
-While the current version of ForestDB successfully implements a single-node, high-throughput, lock-free LSM-Tree storage engine, the architecture was explicitly designed to act as the foundational storage layer for a broader distributed system. 
+> **Living Document Governance — Forward-Facing Always**  
+> This roadmap is strictly, exclusively forward-facing. It catalogues prospective, unbuilt technical milestones and architectural scaling goals for ForestDB.  
+> **The Lifecycle Rule:** The moment a feature or milestone is implemented, tested, and verified, it is permanently excised from this document and transitioned directly into [README.md](file:///c:/Users/Bhatn/OneDrive/Desktop/Projects/github/Forest_DatabaseEngine/README.md) and core system documentation. No historical or completed tags (`[COMPLETED]`) are retained here, ensuring this document always serves as an active, uncompromised forward vision.
 
-The following milestones outline the technical roadmap for scaling ForestDB into a highly available, enterprise-grade database cluster. We have also introduced a **Phase 1: Near-Term Engine Optimizations** to directly address immediate architectural improvements before scaling out.
+---
 
-### Phase 1: Near-Term Engine Optimizations
-*   **[COMPLETED] I/O Latency Monitoring & Backpressure:** Engine metrics monitor WAL fsync durations, MemTable swap latencies, and parsing latency without blocking ingestion loops.
-*   **[COMPLETED] Heuristic-Based Compaction:** Wired L0->L1 compaction trigger based on L0 file counts, integrated with RCU versioning and obsolete file purging.
-*   **[COMPLETED] Dual-Protocol Ingestion & Isolation:** Non-blocking dual-protocol ingestion separating mission-critical TCP mutations from loss-tolerant UDP telemetry with bounded `sync.Pool` buffer recycling.
-*   **Dynamic Memory Pooling:** Expand `sync.Pool` for dynamic variable key/value sizes while maintaining zero-allocation properties.
-*   **Accurate Memory Tracking:** Refine `MemTable` size calculations to track internal struct and pointer alignment overhead.
+### Architectural Context
+ForestDB currently provides a production-grade single-node storage engine featuring:
+- A lock-free SkipList `MemTable` engineered with `sync/atomic` primitives.
+- Append-only Write-Ahead Logging (WAL) with CRC32 integrity validation.
+- Level-0 to Level-1 SSTables with custom Bloom Filters and background K-Way merge compaction under Read-Copy-Update (RCU) safety.
+- Dual-protocol concurrent listeners (guaranteed TCP storage mutations + loss-tolerant UDP telemetry).
+- Zero-allocation binary framing and an embedded stdlib Prometheus RED metrics exporter.
+- TLS 1.3 Mutual Authentication (mTLS) with near zero throughput overhead.
+- Multi-tier ordered range queries (`Scan(startKey, endKey)`) and the official Go Client SDK (`pkg/client`).
 
-### Phase 2: Distributed Consensus & Replication
-To move from a single-node engine to a highly available cluster, we will implement the **Raft Consensus Algorithm**.
-*   **WAL Replication:** Instead of only syncing the Write-Ahead Log to the local disk, the leader node will replicate WAL entries to follower nodes over **gRPC**.
-*   **Leader Election & Failover:** Automatic failover handling. If the leader node crashes (simulated in our Chaos tests), the cluster will seamlessly elect a new leader using Raft randomized timeouts.
-*   **Dynamic Cluster Membership:** Support seamlessly adding or removing nodes from the cluster without downtime.
-*   **Consistent Hashing:** Implement a sharding layer to distribute key ranges across multiple distinct Raft clusters, enabling horizontal write scaling.
+The milestones below define the trajectory for scaling ForestDB into a distributed, multi-tenant, hardware-saturating database cluster.
 
-### Phase 3: Advanced I/O, Memory, & Storage Optimization
-Currently, ForestDB relies on standard POSIX system calls (`os.Write`, `os.ReadAt`) and the OS Page Cache. We plan to bypass these for maximum hardware utilization.
-*   **`io_uring` Integration:** Swap the standard blocking I/O layer on Linux with `io_uring` to achieve true zero-copy, asynchronous disk I/O, drastically reducing context switches during SSTable compactions.
-*   **Memory-Mapped Files (`mmap`):** Utilize memory-mapped I/O for SSTable reads, allowing the OS to page in data blocks transparently and eliminating explicit `ReadAt` buffer copies.
-*   **Direct I/O (`O_DIRECT`) & Custom Cache:** Bypass the Linux kernel page cache entirely for writes. We will implement a custom LRU (Least Recently Used) Block Cache inside the Go runtime to maintain strict control over memory usage and prevent page-cache thrashing during large read scans.
-*   **Block-Level Compression:** Integrate **Zstandard (zstd)** or **LZ4** compression algorithms for SSTable data blocks, significantly trading a small amount of CPU overhead for drastically reduced disk space and I/O bandwidth.
+---
 
-### Phase 4: LSM-Tree Maturity & Query Capabilities
-The current engine supports L0 to L1 background compaction and exact-match point queries (`Get`, `Put`, `Delete`). 
-*   **Strict Leveled Compaction:** Expand the K-Way merge compactor to support cascading compaction down to $L_n$ (e.g., L1 $\rightarrow$ L2 $\rightarrow$ L3), strictly enforcing size amplifiers (e.g., each level is 10x larger than the previous) to bound read amplification mathematically.
-*   **MVCC & Snapshot Isolation:** Implement Multi-Version Concurrency Control using the existing `FileSequenceID`. This will allow long-running read transactions to view a stable snapshot of the database without blocking incoming writes.
-*   **Range Queries:** Implement `Scan(startKey, endKey)` by logically merging the SkipList iterator with the SSTable streaming iterators to serve ordered range scans efficiently.
-*   **Time-To-Live (TTL):** Support automatic key expiration by appending a timestamp to the MemTable entry and dropping expired keys lazily during background compaction.
-*   **Secondary Indexing:** Introduce asynchronous secondary indexes to support querying data beyond just primary key lookups.
+### Phase 1: Near-Term Storage Kernel Optimizations
+*   **Dynamic Variable-Length Memory Pooling:** Expand `sync.Pool` recycling to handle variable key and value sizes without falling back to OS heap allocations on oversized mutation batches.
+*   **Exact Struct & Pointer Byte Accounting:** Refine `MemTable` capacity calculations to account for internal 64-bit struct padding, pointer overhead, and SkipList node height variations, guaranteeing rigid memory ceilings before triggering a flush.
+*   **Vectorized Binary Unpacking:** Evaluate SIMD/vectorized assembly instructions for multi-record batch deserialization over high-bandwidth loopback interfaces.
 
-### Phase 5: Enterprise Security & Observability
-*   **[COMPLETED] TLS/mTLS Encryption:** Implemented two-way certificate authentication (`crypto/tls`) enforcing TLS 1.3 mutual authentication for encrypted node-to-node communication.
-*   **[COMPLETED] Prometheus Metrics & Grafana Dashboard:** Implemented a zero-allocation, stdlib-only Prometheus `/metrics` exporter tracking RED metrics and engine internals, complete with pre-built Grafana dashboards.
-*   **Role-Based Access Control (RBAC):** Implement lightweight, token-based authentication and authorization for the binary protocol.
+---
 
-### Phase 6: Ecosystem & Tooling
-*   **CLI Introspection Tool:** Build a standalone CLI utility (e.g., `forest-cli inspect`) that can parse and print the binary structures of `.sst` files, Bloom Filters, and WALs offline for debugging.
-*   **Official Client SDKs:** Develop idiomatic client libraries in Go, Rust, and Python that natively speak the zero-allocation Forest binary protocol, complete with connection pooling and automatic leader-discovery routing.
+### Phase 2: Distributed Consensus & Replication (Raft Engine)
+To evolve ForestDB from a single-node engine into a fault-tolerant distributed cluster:
+*   **gRPC WAL Stream Replication:** Instead of writing solely to local disk, the leader node will asynchronously stream WAL entries to follower nodes over low-latency gRPC streams.
+*   **Automated Leader Election & Heartbeat Monitors:** Implement Raft randomized election timeouts (150ms–300ms) to ensure seamless cluster failover if the active leader node terminates.
+*   **Zero-Downtime Cluster Reconfiguration:** Support dynamic cluster membership changes, allowing nodes to join or leave without pausing client write pipelines.
+*   **Consistent Hash Partitioning:** Introduce an orchestration and sharding layer to partition key ranges across distinct multi-Raft consensus groups, achieving horizontal write scaling across multiple machines.
+
+---
+
+### Phase 3: Linux Kernel Bypass & Hardware Saturation
+Currently, ForestDB relies on standard POSIX system calls (`os.Write`, `os.ReadAt`) and the operating system page cache. We plan to bypass these abstraction layers for maximum I/O saturation:
+*   **`io_uring` Asynchronous Disk Engine:** Replace blocking POSIX system calls on Linux with `io_uring` submission/completion queues to achieve true asynchronous, zero-copy disk I/O, drastically reducing context switches during heavy background compactions.
+*   **Memory-Mapped File Operations (`mmap`):** Utilize `mmap` for SSTable read paths, allowing the kernel to page in SSTable blocks transparently and eliminating userspace `ReadAt` buffer copies.
+*   **Direct I/O (`O_DIRECT`) & In-Memory LRU Block Cache:** Bypass the kernel page cache entirely for write paths to eliminate page-cache pollution. Implement an in-memory Least Recently Used (LRU) Block Cache directly inside the Go runtime to maintain strict memory isolation during massive sequential scans.
+*   **Block-Level Compression (LZ4 / Zstandard):** Integrate streaming LZ4 and Zstandard algorithms for SSTable data blocks, trading minimal CPU overhead for up to 60% disk footprint reduction and reduced physical I/O bandwidth.
+
+---
+
+### Phase 4: LSM Query Maturity & Transactional Semantics
+*   **Strict Multi-Tier Leveled Compaction ($L_0 \rightarrow L_n$):** Expand the background compactor to cascade merges down to $L_2, L_3, \dots, L_n$, enforcing rigid 10x size amplification boundaries per level to mathematically bound read amplification.
+*   **Multi-Version Concurrency Control (MVCC) & Snapshot Isolation:** Assign monotonic transaction sequence IDs to writes, allowing long-running read transactions to view stable historical snapshots without blocking concurrent incoming writes.
+*   **Time-To-Live (TTL) Key Pruning:** Append optional microsecond timestamps to keys and discard expired entries lazily during background SSTable compaction merges.
+*   **Secondary Indexes:** Implement asynchronous, non-blocking secondary indexes enabling range queries over non-primary fields.
+
+---
+
+### Phase 5: Enterprise Multi-Tenancy & Access Governance
+*   **Role-Based Access Control (RBAC):** Introduce a token-based authentication and permissions system directly inside the binary protocol framing to support granular read/write/admin capabilities.
+*   **Cryptographic Tenant Isolation:** Implement virtual namespaces partitioning keyspaces with dedicated cryptographic encryption keys per tenant.
+
+---
+
+### Phase 6: Developer Ecosystem & Tooling
+*   **`forest-cli` Offline Binary Inspector:** Build a standalone command-line introspection tool to parse, inspect, and repair `.sst` data blocks, Bloom Filter bit arrays, and WAL segments directly on disk for debugging.
+*   **Polyglot Client SDKs:** Develop idiomatic, high-throughput client SDKs in **Rust** and **Python** mirroring the official Go Client SDK (`pkg/client`), featuring built-in connection pooling, mTLS, and automatic shard routing.

@@ -24,7 +24,14 @@ const (
 	OpDelete    OpCode = 0x04
 	OpTelemetry OpCode = 0x05
 	OpHeartbeat OpCode = 0x06
+	OpScan      OpCode = 0x07
 )
+
+// KeyValue represents an ordered key-value pair returned by range scans.
+type KeyValue struct {
+	Key   []byte
+	Value []byte
+}
 
 // RequestHeader represents the parsed 8-byte TCP packet header.
 type RequestHeader struct {
@@ -46,6 +53,7 @@ type Storage interface {
 	Put(key, val []byte) error
 	Get(key []byte) ([]byte, bool, error)
 	Delete(key []byte) error
+	Scan(startKey, endKey []byte) ([]KeyValue, error)
 }
 
 // ParseHeader reads exactly HeaderSize bytes from the io.Reader into the provided buffer

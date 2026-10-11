@@ -1,3 +1,5 @@
+// Package engine implements the core LSM-Tree storage structures, including Bloom Filters,
+// SkipList-backed MemTables, Write-Ahead Logging (WAL), SSTables, and background compactions.
 package engine
 
 import (

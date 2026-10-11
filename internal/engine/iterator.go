@@ -1,3 +1,5 @@
+// Package engine implements sequential streaming iterators over SSTable data blocks
+// for K-Way merge compaction and range scan queries.
 package engine
 
 import (

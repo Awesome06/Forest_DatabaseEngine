@@ -6,7 +6,7 @@ import (
 	"io"
 	"log"
 	"net"
-	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -21,11 +21,11 @@ func BenchmarkSystemEndToEnd(b *testing.B) {
 	// Mute all standard logger output to prevent syscall bottlenecks
 	log.SetOutput(io.Discard)
 	
-	os.RemoveAll("bench_test.wal")
-	os.RemoveAll("data-L0-bench.sst")
-	defer os.RemoveAll("bench_test.wal")
+	tempDir := b.TempDir()
+	walPath := filepath.Join(tempDir, "bench_test.wal")
+	sstDir := filepath.Join(tempDir, "sst")
 
-	db, err := engine.NewDB("bench_test.wal")
+	db, err := engine.NewDB(walPath, engine.WithSSTDir(sstDir))
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -73,10 +73,11 @@ func BenchmarkSystemEndToEnd(b *testing.B) {
 func BenchmarkMTLSSystemEndToEnd(b *testing.B) {
 	log.SetOutput(io.Discard)
 
-	os.RemoveAll("bench_mtls.wal")
-	defer os.RemoveAll("bench_mtls.wal")
+	tempDir := b.TempDir()
+	walPath := filepath.Join(tempDir, "bench_mtls.wal")
+	sstDir := filepath.Join(tempDir, "sst")
 
-	db, err := engine.NewDB("bench_mtls.wal")
+	db, err := engine.NewDB(walPath, engine.WithSSTDir(sstDir))
 	if err != nil {
 		b.Fatal(err)
 	}

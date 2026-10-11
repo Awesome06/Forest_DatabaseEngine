@@ -1,3 +1,5 @@
+// Package engine implements Read-Copy-Update (RCU) manifest versioning and atomic pointer swaps
+// for lock-free multi-version concurrency control across concurrent reads and background compactions.
 package engine
 
 import (

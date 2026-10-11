@@ -1,3 +1,5 @@
+// Package engine implements a concurrent lock-free SkipList MemTable that sustains high write
+// throughput while serving infinite concurrent readers with zero lock contention.
 package engine
 
 import (
@@ -6,6 +8,8 @@ import (
 	"math/rand"
 	"sync"
 	"sync/atomic"
+
+	"github.com/Forest_DatabaseEngine/internal/network"
 )
 
 // maxLevel defines the maximum height of the SkipList.
@@ -199,3 +203,66 @@ func (m *MemTable) Freeze() {
 	m.frozen.Store(true)
 	m.mu.Unlock()
 }
+
+// Scan returns all key-value entries in the MemTable within the range [startKey, endKey]
+// in ascending sorted order. If startKey is nil/empty, iteration starts from the lowest key.
+// If endKey is nil/empty, iteration continues through the highest key.
+// The returned slice includes tombstones (where len(Value) == 0) so callers can correctly
+// suppress older values during layered LSM reads.
+// This operation traverses Level 0 of the SkipList lock-free with zero lock contention.
+func (m *MemTable) Scan(startKey, endKey []byte) []network.KeyValue {
+	var results []network.KeyValue
+	curr := m.head
+
+	// Traverse higher levels to locate the first node strictly preceding startKey.
+	if len(startKey) > 0 {
+		for i := maxLevel - 1; i >= 0; i-- {
+			for {
+				next := curr.nexts[i].Load()
+				if next != nil && bytes.Compare(next.key, startKey) < 0 {
+					curr = next
+				} else {
+					break
+				}
+			}
+		}
+	}
+
+	// Traverse Level 0 linked list from curr forward.
+	for {
+		next := curr.nexts[0].Load()
+		if next == nil {
+			break
+		}
+
+		// If next.key exceeds endKey, terminate early (SkipList is strictly sorted).
+		if len(endKey) > 0 && bytes.Compare(next.key, endKey) > 0 {
+			break
+		}
+
+		if len(startKey) == 0 || bytes.Compare(next.key, startKey) >= 0 {
+			valPtr := next.val.Load()
+			if valPtr != nil {
+				val := *valPtr
+				kCopy := make([]byte, len(next.key))
+				copy(kCopy, next.key)
+
+				var vCopy []byte
+				if val != nil {
+					vCopy = make([]byte, len(val))
+					copy(vCopy, val)
+				}
+
+				results = append(results, network.KeyValue{
+					Key:   kCopy,
+					Value: vCopy,
+				})
+			}
+		}
+
+		curr = next
+	}
+
+	return results
+}
+

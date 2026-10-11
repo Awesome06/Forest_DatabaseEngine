@@ -1,3 +1,5 @@
+// Package engine provides K-Way merge compaction and background file lifecycle management
+// to prevent read amplification and bound disk space consumption.
 package engine
 
 import (

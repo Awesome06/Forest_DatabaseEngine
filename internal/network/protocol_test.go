@@ -185,6 +185,7 @@ type mockStorage struct{}
 func (m *mockStorage) Put(key, val []byte) error { return nil }
 func (m *mockStorage) Get(key []byte) ([]byte, bool, error) { return nil, false, nil }
 func (m *mockStorage) Delete(key []byte) error { return nil }
+func (m *mockStorage) Scan(startKey, endKey []byte) ([]KeyValue, error) { return nil, nil }
 
 // TestEndToEndEcho starts the TCP server, sends an Echo request, and verifies the response.
 func TestEndToEndEcho(t *testing.T) {

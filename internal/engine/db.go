@@ -2,10 +2,12 @@
 package engine
 
 import (
+	"bytes"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -197,6 +199,107 @@ func (db *DB) Get(key []byte) ([]byte, bool, error) {
 	}
 
 	return nil, false, nil
+}
+
+// Scan executes a range query over the LSM-Tree hierarchy [startKey, endKey] in ascending sorted order.
+// If startKey is nil or empty, the scan starts from the smallest key in the engine.
+// If endKey is nil or empty, the scan continues through the largest key in the engine.
+// The query merges the active MemTable, immutable MemTable, Level-0 SSTables, and Level-1 SSTables,
+// correctly applying tombstone suppression and newer-version-overwrites lock-free using RCU versioning.
+func (db *DB) Scan(startKey, endKey []byte) ([]network.KeyValue, error) {
+	seen := make(map[string]struct{})
+	var candidates []network.KeyValue
+
+	// 1. Scan Active MemTable (newest mutations)
+	if active := db.activeMT.Load(); active != nil {
+		for _, item := range active.Scan(startKey, endKey) {
+			kStr := string(item.Key)
+			if _, exists := seen[kStr]; !exists {
+				seen[kStr] = struct{}{}
+				if len(item.Value) > 0 { // Non-tombstone
+					candidates = append(candidates, item)
+				}
+			}
+		}
+	}
+
+	// 2. Scan Immutable MemTable (pending background flush)
+	if immutable := db.immutableMT.Load(); immutable != nil {
+		for _, item := range immutable.Scan(startKey, endKey) {
+			kStr := string(item.Key)
+			if _, exists := seen[kStr]; !exists {
+				seen[kStr] = struct{}{}
+				if len(item.Value) > 0 {
+					candidates = append(candidates, item)
+				}
+			}
+		}
+	}
+
+	// 3. Scan SSTables under RCU version guard
+	var version *Version
+	for {
+		version = db.currentVersion.Load()
+		if version.Acquire() {
+			break
+		}
+	}
+	defer version.Release()
+
+	// Helper to scan a single SSTable file sequentially
+	scanSST := func(filePath string) error {
+		it, err := NewSSTIterator(filePath, 0)
+		if err != nil {
+			return err
+		}
+		defer it.Close()
+
+		for it.Next() {
+			k := it.Key()
+			// Early termination: since SSTables are sorted ascending, stop if beyond endKey
+			if len(endKey) > 0 && bytes.Compare(k, endKey) > 0 {
+				break
+			}
+			if len(startKey) == 0 || bytes.Compare(k, startKey) >= 0 {
+				kStr := string(k)
+				if _, exists := seen[kStr]; !exists {
+					seen[kStr] = struct{}{}
+					if it.OpCode() != network.OpDelete && len(it.Value()) > 0 {
+						kCopy := make([]byte, len(k))
+						copy(kCopy, k)
+						vCopy := make([]byte, len(it.Value()))
+						copy(vCopy, it.Value())
+						candidates = append(candidates, network.KeyValue{
+							Key:   kCopy,
+							Value: vCopy,
+						})
+					}
+				}
+			}
+		}
+		return it.Error()
+	}
+
+	// Scan L0 files from newest to oldest
+	for i := len(version.Manifest.L0Files) - 1; i >= 0; i-- {
+		if err := scanSST(version.Manifest.L0Files[i]); err != nil {
+			return nil, fmt.Errorf("failed to scan L0 SSTable %s: %w", version.Manifest.L0Files[i], err)
+		}
+	}
+
+	// Scan L1 files
+	for i := len(version.Manifest.L1Files) - 1; i >= 0; i-- {
+		if err := scanSST(version.Manifest.L1Files[i]); err != nil {
+			return nil, fmt.Errorf("failed to scan L1 SSTable %s: %w", version.Manifest.L1Files[i], err)
+		}
+	}
+
+	// Sort final candidate list in ascending key order
+	sort.Slice(candidates, func(i, j int) bool {
+		return bytes.Compare(candidates[i].Key, candidates[j].Key) < 0
+	})
+
+	return candidates, nil
 }
 
 // Put appends the mutation to the WAL and inserts it into the active MemTable lock-free.

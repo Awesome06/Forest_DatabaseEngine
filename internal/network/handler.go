@@ -109,6 +109,51 @@ func HandleRequest(conn net.Conn, header RequestHeader, payloadBuf []byte, db St
 		engMetrics.TCPRequestsDelOk.Inc()
 		return sendAck(conn)
 
+	case OpScan:
+		items, err := db.Scan(key, val)
+		if err != nil {
+			engMetrics.TCPRequestsErrors.Inc()
+			return fmt.Errorf("storage engine failed to process Scan: %w", err)
+		}
+
+		var totalBytes uint32
+		for _, it := range items {
+			totalBytes += uint32(6 + len(it.Key) + len(it.Value))
+		}
+
+		var respHeader [8]byte
+		respHeader[0] = MagicByte
+		respHeader[1] = byte(OpScan)
+		binary.BigEndian.PutUint16(respHeader[2:4], uint16(len(items)))
+		binary.BigEndian.PutUint32(respHeader[4:8], totalBytes)
+
+		if _, err := conn.Write(respHeader[:]); err != nil {
+			engMetrics.TCPRequestsErrors.Inc()
+			return fmt.Errorf("failed to write scan header: %w", err)
+		}
+
+		var itemHdr [6]byte
+		for _, it := range items {
+			binary.BigEndian.PutUint16(itemHdr[0:2], uint16(len(it.Key)))
+			binary.BigEndian.PutUint32(itemHdr[2:6], uint32(len(it.Value)))
+			if _, err := conn.Write(itemHdr[:]); err != nil {
+				engMetrics.TCPRequestsErrors.Inc()
+				return fmt.Errorf("failed to write scan item header: %w", err)
+			}
+			if _, err := conn.Write(it.Key); err != nil {
+				engMetrics.TCPRequestsErrors.Inc()
+				return fmt.Errorf("failed to write scan item key: %w", err)
+			}
+			if len(it.Value) > 0 {
+				if _, err := conn.Write(it.Value); err != nil {
+					engMetrics.TCPRequestsErrors.Inc()
+					return fmt.Errorf("failed to write scan item value: %w", err)
+				}
+			}
+		}
+		engMetrics.TCPRequestsScanOk.Inc()
+		return nil
+
 	default:
 		engMetrics.TCPRequestsErrors.Inc()
 		return sendNotFound(conn)

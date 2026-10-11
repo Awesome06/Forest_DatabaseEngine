@@ -208,6 +208,57 @@ func TestDB_RecoveryFromWAL(t *testing.T) {
 	}
 }
 
+func TestDB_RangeScan(t *testing.T) {
+	testDir := t.TempDir()
+	walPath := filepath.Join(testDir, "scan.wal")
+	sstDir := filepath.Join(testDir, "sst")
+
+	db, err := engine.NewDB(walPath, engine.WithSSTDir(sstDir))
+	if err != nil {
+		t.Fatalf("failed to init db: %v", err)
+	}
+	defer db.Close()
+
+	// 1. Insert older entries and flush to L0 SSTable
+	_ = db.Put([]byte("item:01"), []byte("old-val-1"))
+	_ = db.Put([]byte("item:02"), []byte("val-2"))
+	_ = db.Put([]byte("item:03"), []byte("val-3"))
+	db.CheckFlush()
+	time.Sleep(100 * time.Millisecond)
+
+	// 2. Insert updates, new entries, and a tombstone in active MemTable
+	_ = db.Put([]byte("item:01"), []byte("new-val-1")) // Overwrite
+	_ = db.Delete([]byte("item:02"))                    // Tombstone
+	_ = db.Put([]byte("item:04"), []byte("val-4"))      // New key
+	_ = db.Put([]byte("item:05"), []byte("val-5"))      // New key
+
+	// 3. Execute Range Scan [item:01, item:04]
+	results, err := db.Scan([]byte("item:01"), []byte("item:04"))
+	if err != nil {
+		t.Fatalf("Scan failed: %v", err)
+	}
+
+	// Expected:
+	// item:01 -> "new-val-1" (overwrites L0)
+	// item:02 -> omitted (tombstone in active MemTable suppresses L0)
+	// item:03 -> "val-3" (from L0)
+	// item:04 -> "val-4" (from MemTable)
+	// item:05 -> omitted (beyond endKey item:04)
+	if len(results) != 3 {
+		t.Fatalf("expected 3 results, got %d: %v", len(results), results)
+	}
+
+	if string(results[0].Key) != "item:01" || string(results[0].Value) != "new-val-1" {
+		t.Fatalf("expected item:01=new-val-1, got %s=%s", results[0].Key, results[0].Value)
+	}
+	if string(results[1].Key) != "item:03" || string(results[1].Value) != "val-3" {
+		t.Fatalf("expected item:03=val-3, got %s=%s", results[1].Key, results[1].Value)
+	}
+	if string(results[2].Key) != "item:04" || string(results[2].Value) != "val-4" {
+		t.Fatalf("expected item:04=val-4, got %s=%s", results[2].Key, results[2].Value)
+	}
+}
+
 // Clean up any remaining artifacts
 func TestMain(m *testing.M) {
 	code := m.Run()

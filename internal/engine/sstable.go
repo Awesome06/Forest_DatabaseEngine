@@ -1,3 +1,5 @@
+// Package engine provides disk-backed Sorted String Tables (SSTables) with integrated 4KB data blocks,
+// sparse indexing, and embedded Bloom Filters for high-performance point lookups and range scans.
 package engine
 
 import (

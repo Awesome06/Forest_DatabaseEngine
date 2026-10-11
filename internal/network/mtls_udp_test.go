@@ -51,6 +51,20 @@ func (s *inMemoryStorage) Delete(k []byte) error {
 	return nil
 }
 
+func (s *inMemoryStorage) Scan(startKey, endKey []byte) ([]network.KeyValue, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var res []network.KeyValue
+	for k, v := range s.data {
+		kb := []byte(k)
+		if (len(startKey) == 0 || bytes.Compare(kb, startKey) >= 0) &&
+			(len(endKey) == 0 || bytes.Compare(kb, endKey) <= 0) {
+			res = append(res, network.KeyValue{Key: kb, Value: append([]byte(nil), v...)})
+		}
+	}
+	return res, nil
+}
+
 func TestMTLSSecureNodeCommunication(t *testing.T) {
 	serverCfg, clientCfg, err := network.GenerateTestMTLSCredentials()
 	if err != nil {

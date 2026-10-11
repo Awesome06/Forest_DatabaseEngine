@@ -5,6 +5,15 @@
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
 cd "$REPO_ROOT" || exit 0
 
+# Pre-commit safety guard: Auto-destage any accidental .sst or .wal files from Git index (disk preserved)
+STAGED_DB_FILES=$(git diff --cached --name-only -- "*.sst" "*.wal" 2>/dev/null)
+if [ -n "$STAGED_DB_FILES" ]; then
+    echo "Pre-Commit Guard (POSIX): Detected .sst/.wal database files staged in Git index."
+    git reset HEAD -- "*.sst" "*.wal" 2>/dev/null || true
+    echo "Pre-Commit Guard: Auto-destaged database files from commit (local disk files preserved)."
+    echo "                  Use 'make clean-sst' if you wish to physically delete them."
+fi
+
 REGISTRY_MAP=".agent/.registry/skill-map.json"
 ACTIVE_SKILLS=".agent/.active-skills.json"
 SKILLS_DIR=".agent/skills"

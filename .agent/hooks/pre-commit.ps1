@@ -6,6 +6,20 @@ $repoRoot = git rev-parse --show-toplevel
 if ($LASTEXITCODE -ne 0) { exit 0 }
 Set-Location -Path $repoRoot
 
+# Pre-commit safety guard: Auto-destage any accidental .sst or .wal files from Git index (disk preserved)
+$stagedDBFiles = git diff --cached --name-only -- "*.sst" "*.wal" 2>$null
+if ($stagedDBFiles) {
+    $fileList = @($stagedDBFiles -split "`r?`n" | Where-Object { $_.Trim() -ne "" })
+    if ($fileList.Count -gt 0) {
+        Write-Host "Pre-Commit Guard: Detected $($fileList.Count) database file(s) staged in Git index." -ForegroundColor Yellow
+        foreach ($f in $fileList) {
+            git reset HEAD -- $f 2>$null
+            Write-Host "  Auto-destaged from commit: $f (local disk file preserved)" -ForegroundColor Yellow
+        }
+        Write-Host "Pre-Commit Guard: Database files safely unstaged. (Use 'make clean-sst' to physically delete them)." -ForegroundColor Cyan
+    }
+}
+
 $registryMapPath = ".agent\.registry\skill-map.json"
 $activeSkillsPath = ".agent\.active-skills.json"
 $skillsDir = ".agent\skills"
