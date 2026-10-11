@@ -1,0 +1,10 @@
+﻿{
+    "version":  "1.0.0",
+    "initialized_at":  "2026-10-11T21:45:09Z",
+    "stack":  "auto",
+    "active_skills":  [
+                          "ops/cicd-pipeline",
+                          "langs/go-systems",
+                          "domain/lsm-storage"
+                      ]
+}

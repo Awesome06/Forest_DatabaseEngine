@@ -1,0 +1,3 @@
+[submodule ".agent/.registry"]
+	path = .agent/.registry
+	url = https://github.com/Awesome06/agent-skills-vault.git

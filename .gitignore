@@ -22,3 +22,7 @@ go.work
 # Local DB files
 *.wal
 *.sst
+
+# Antigravity dynamic links (rebuilt per workspace; tracked via .agent/.active-skills.json)
+.agent/skills/*
+!.agent/skills/.gitkeep
