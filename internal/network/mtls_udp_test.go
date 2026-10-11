@@ -2,10 +2,17 @@ package network_test
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/binary"
 	"io"
+	"math/big"
 	"net"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -250,3 +257,99 @@ func TestDualProtocolTCPAndUDP(t *testing.T) {
 		t.Fatalf("invalid TCP ACK")
 	}
 }
+
+func TestWritePEMFilesAndLoadTLS(t *testing.T) {
+	tempDir := t.TempDir()
+	serverCertPath := filepath.Join(tempDir, "server.crt")
+	serverKeyPath := filepath.Join(tempDir, "server.key")
+	clientCertPath := filepath.Join(tempDir, "client.crt")
+	clientKeyPath := filepath.Join(tempDir, "client.key")
+	caCertPath := filepath.Join(tempDir, "ca.crt")
+	caKeyPath := filepath.Join(tempDir, "ca.key")
+
+	caPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate CA key: %v", err)
+	}
+	caTemplate := &x509.Certificate{
+		SerialNumber:          big.NewInt(10),
+		Subject:               pkix.Name{CommonName: "Test File CA"},
+		NotBefore:             time.Now().Add(-1 * time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, &caPriv.PublicKey, caPriv)
+	if err != nil {
+		t.Fatalf("failed to create CA certificate: %v", err)
+	}
+	if err := network.WritePEMFiles(caCertPath, caKeyPath, caDER, caPriv); err != nil {
+		t.Fatalf("WritePEMFiles for CA failed: %v", err)
+	}
+
+	srvPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate server key: %v", err)
+	}
+	srvTemplate := &x509.Certificate{
+		SerialNumber: big.NewInt(11),
+		Subject:      pkix.Name{CommonName: "localhost"},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+		DNSNames:     []string{"localhost"},
+		NotBefore:    time.Now().Add(-1 * time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	srvDER, err := x509.CreateCertificate(rand.Reader, srvTemplate, caTemplate, &srvPriv.PublicKey, caPriv)
+	if err != nil {
+		t.Fatalf("failed to create server certificate: %v", err)
+	}
+	if err := network.WritePEMFiles(serverCertPath, serverKeyPath, srvDER, srvPriv); err != nil {
+		t.Fatalf("WritePEMFiles for server failed: %v", err)
+	}
+
+	clientPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate client key: %v", err)
+	}
+	clientTemplate := &x509.Certificate{
+		SerialNumber: big.NewInt(12),
+		Subject:      pkix.Name{CommonName: "client-test"},
+		NotBefore:    time.Now().Add(-1 * time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	clientDER, err := x509.CreateCertificate(rand.Reader, clientTemplate, caTemplate, &clientPriv.PublicKey, caPriv)
+	if err != nil {
+		t.Fatalf("failed to create client certificate: %v", err)
+	}
+	if err := network.WritePEMFiles(clientCertPath, clientKeyPath, clientDER, clientPriv); err != nil {
+		t.Fatalf("WritePEMFiles for client failed: %v", err)
+	}
+
+	srvCfg, err := network.LoadServerTLSConfig(serverCertPath, serverKeyPath, caCertPath)
+	if err != nil {
+		t.Fatalf("LoadServerTLSConfig failed: %v", err)
+	}
+
+	clientCfg, err := network.LoadClientTLSConfig(clientCertPath, clientKeyPath, caCertPath, "localhost")
+	if err != nil {
+		t.Fatalf("LoadClientTLSConfig failed: %v", err)
+	}
+
+	addr := "127.0.0.1:9199"
+	srv := network.NewServer(addr, newInMemoryStorage(), network.WithTLS(srvCfg))
+	go func() { _ = srv.Start() }()
+	defer srv.Stop()
+	time.Sleep(100 * time.Millisecond)
+
+	conn, err := tls.Dial("tcp", addr, clientCfg)
+	if err != nil {
+		t.Fatalf("tls.Dial using loaded config files failed: %v", err)
+	}
+	defer conn.Close()
+}
+

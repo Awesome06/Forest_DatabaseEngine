@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -25,7 +26,7 @@ func main() {
 	udpPortFlag := flag.Int("udp-port", 9001, "UDP port to listen on for loss-tolerant telemetry datagrams (0 to disable)")
 	metricsPortFlag := flag.Int("metrics-port", 2112, "HTTP port to expose Prometheus /metrics endpoint (0 to disable)")
 	walDirFlag := flag.String("wal-dir", "data/wal", "Directory path for Write-Ahead Log (WAL) files")
-	_ = flag.String("sst-dir", "data/sst", "Directory path for Sorted String Table (SSTable) files")
+	sstDirFlag := flag.String("sst-dir", "data/sst", "Directory path for Sorted String Table (SSTable) files")
 
 	// TLS / mTLS configuration flags
 	tlsCertFlag := flag.String("tls-cert", "", "Path to PEM certificate file for mTLS")
@@ -41,8 +42,8 @@ func main() {
 
 	walPath := fmt.Sprintf("%s/forest.wal", *walDirFlag)
 
-	// Initialize the storage engine.
-	dbEngine, err := engine.NewDB(walPath)
+	// Initialize the storage engine with configured SSTable directory.
+	dbEngine, err := engine.NewDB(walPath, engine.WithSSTDir(*sstDirFlag))
 	if err != nil {
 		log.Fatalf("failed to initialize storage engine at %s: %v", walPath, err)
 	}
@@ -53,6 +54,16 @@ func main() {
 	if *udpPortFlag > 0 {
 		udpAddr := fmt.Sprintf("127.0.0.1:%d", *udpPortFlag)
 		serverOpts = append(serverOpts, network.WithUDP(udpAddr))
+
+		// Process incoming UDP telemetry and heartbeats
+		serverOpts = append(serverOpts, network.WithTelemetryHandler(func(op network.OpCode, payload []byte, from net.Addr) {
+			switch op {
+			case network.OpHeartbeat:
+				log.Printf("Telemetry: Node heartbeat received from %s", from.String())
+			case network.OpTelemetry:
+				log.Printf("Telemetry: Metric report (%d bytes) from %s: %s", len(payload), from.String(), string(payload))
+			}
+		}))
 	}
 
 	if *tlsCertFlag != "" && *tlsKeyFlag != "" {

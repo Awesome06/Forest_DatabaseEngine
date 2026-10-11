@@ -4,6 +4,8 @@ package engine
 import (
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -11,6 +13,34 @@ import (
 	"github.com/Forest_DatabaseEngine/internal/metrics"
 	"github.com/Forest_DatabaseEngine/internal/network"
 )
+
+// DBOption configures optional parameters of DB.
+type DBOption func(*DB)
+
+// WithSSTDir sets the directory path where SSTable files are stored.
+func WithSSTDir(dir string) DBOption {
+	return func(db *DB) {
+		db.sstDir = dir
+	}
+}
+
+// WithCompactionThreshold sets the number of L0 files that trigger compaction into L1.
+func WithCompactionThreshold(threshold int) DBOption {
+	return func(db *DB) {
+		if threshold > 0 {
+			db.compactionThreshold = threshold
+		}
+	}
+}
+
+// WithFlushThreshold sets the MemTable byte size threshold that triggers a flush.
+func WithFlushThreshold(bytes int64) DBOption {
+	return func(db *DB) {
+		if bytes > 0 {
+			db.flushThreshold = bytes
+		}
+	}
+}
 
 // DB coordinates the active MemTable, WAL, and background SSTable flushes.
 // It uses atomic pointers and RCU (Read-Copy-Update) semantics to ensure
@@ -34,10 +64,14 @@ type DB struct {
 	
 	// currentVersion uses RCU to swap the active SSTable manifest atomically.
 	currentVersion atomic.Pointer[Version]
+
+	sstDir              string
+	compactionThreshold int
+	compactionMu        sync.Mutex
 }
 
 // NewDB initializes the engine state, recovers from the WAL, and starts background workers.
-func NewDB(walPath string) (*DB, error) {
+func NewDB(walPath string, opts ...DBOption) (*DB, error) {
 	wal, err := NewWAL(walPath)
 	if err != nil {
 		return nil, fmt.Errorf("engine failed to initialize WAL: %w", err)
@@ -49,11 +83,22 @@ func NewDB(walPath string) (*DB, error) {
 	}
 
 	db := &DB{
-		wal:            wal,
-		flushQ:         make(chan *MemTable, 1),
-		stopCh:         make(chan struct{}),
-		flushThreshold: 4 * 1024 * 1024, // 4MB
+		wal:                 wal,
+		flushQ:              make(chan *MemTable, 1),
+		stopCh:              make(chan struct{}),
+		flushThreshold:      4 * 1024 * 1024, // 4MB
+		compactionThreshold: 4,               // Default to 4 L0 files
 	}
+	for _, opt := range opts {
+		opt(db)
+	}
+
+	if db.sstDir != "" {
+		if err := os.MkdirAll(db.sstDir, 0755); err != nil {
+			return nil, fmt.Errorf("failed to create SSTable directory %s: %w", db.sstDir, err)
+		}
+	}
+
 	db.activeMT.Store(mt)
 
 	initialVersion := &Version{
@@ -68,6 +113,25 @@ func NewDB(walPath string) (*DB, error) {
 	go db.flushWorker()
 
 	return db, nil
+}
+
+// generateSSTPath formats an SSTable file path respecting the configured sstDir.
+func (db *DB) generateSSTPath(level string, id int64) string {
+	fname := fmt.Sprintf("data-%s-%d.sst", level, id)
+	if db.sstDir != "" {
+		return filepath.Join(db.sstDir, fname)
+	}
+	return fname
+}
+
+// CurrentVersion returns the active RCU Version snapshot.
+func (db *DB) CurrentVersion() *Version {
+	return db.currentVersion.Load()
+}
+
+// TriggerCompaction manually initiates a compaction pass if L0 files meet the threshold.
+func (db *DB) TriggerCompaction() {
+	db.maybeCompact()
 }
 
 // Get executes the complete LSM read path (MemTable -> Immutable -> SSTables).
@@ -214,6 +278,56 @@ func (db *DB) CheckFlush() {
 	metrics.DefaultEngineMetrics.MemTableActiveBytes.Set(int64(newMT.Size()))
 }
 
+// maybeCompact triggers background compaction of L0 files into an L1 file
+// if the L0 file count reaches the configured compactionThreshold.
+func (db *DB) maybeCompact() {
+	db.compactionMu.Lock()
+	defer db.compactionMu.Unlock()
+
+	currentVer := db.currentVersion.Load()
+	l0Count := len(currentVer.Manifest.L0Files)
+	if l0Count < db.compactionThreshold {
+		return
+	}
+
+	// Capture the batch of L0 files to compact
+	l0FilesToCompact := append([]string(nil), currentVer.Manifest.L0Files...)
+	l1Path := db.generateSSTPath("L1", time.Now().UnixNano())
+
+	if err := CompactL0toL1(l0FilesToCompact, l1Path); err != nil {
+		log.Printf("critical: background compaction failed for %v: %v", l0FilesToCompact, err)
+		return
+	}
+
+	// RCU swap: remove compacted L0 files and add the new L1 file
+	oldVersion := db.currentVersion.Load()
+	
+	// Retain any new L0 files that might have been flushed during compaction
+	compactedSet := make(map[string]struct{}, len(l0FilesToCompact))
+	for _, f := range l0FilesToCompact {
+		compactedSet[f] = struct{}{}
+	}
+
+	var remainingL0 []string
+	for _, f := range oldVersion.Manifest.L0Files {
+		if _, exists := compactedSet[f]; !exists {
+			remainingL0 = append(remainingL0, f)
+		}
+	}
+
+	newManifest := Manifest{
+		L0Files: remainingL0,
+		L1Files: append(append([]string(nil), oldVersion.Manifest.L1Files...), l1Path),
+	}
+	newVersion := &Version{
+		Manifest: newManifest,
+	}
+	db.currentVersion.Store(newVersion)
+
+	// Safely purge obsolete L0 files after active readers finish
+	go PurgeObsoleteFiles(oldVersion, l0FilesToCompact)
+}
+
 // flushWorker acts as a background sink, persisting frozen MemTables to L0 SSTables.
 func (db *DB) flushWorker() {
 	defer db.wg.Done()
@@ -222,7 +336,7 @@ func (db *DB) flushWorker() {
 	for {
 		select {
 		case mt := <-db.flushQ:
-			filepath := fmt.Sprintf("data-L0-%d.sst", flushCount)
+			filepath := db.generateSSTPath("L0", flushCount)
 			if err := FlushMemTable(mt, filepath); err != nil {
 				log.Printf("critical: failed to flush MemTable to %s: %v", filepath, err)
 			}
@@ -248,11 +362,16 @@ func (db *DB) flushWorker() {
 			db.immutableMT.Store(nil)
 			db.mu.Unlock()
 
+			// Check compaction condition:
+			if len(newManifest.L0Files) >= db.compactionThreshold {
+				db.maybeCompact()
+			}
+
 		case <-db.stopCh:
 			// Drain remaining flush queue on shutdown to guarantee crash durability.
 			close(db.flushQ)
 			for mt := range db.flushQ {
-				filepath := fmt.Sprintf("data-L0-%d.sst", flushCount)
+				filepath := db.generateSSTPath("L0", flushCount)
 				if err := FlushMemTable(mt, filepath); err != nil {
 					log.Printf("critical: failed to flush MemTable to %s during shutdown: %v", filepath, err)
 				}

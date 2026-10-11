@@ -247,7 +247,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 			return
 		}
 
-		if err := HandleRequest(conn, header, payloadBuf, s.db); err != nil {
+		if err := HandleRequest(conn, header, payloadBuf, s.db, s.metrics); err != nil {
 			log.Printf("critical: failed to handle request for operation %v: %v", header.Op, err)
 			return
 		}

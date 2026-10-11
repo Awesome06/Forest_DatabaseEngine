@@ -80,6 +80,65 @@ func TestParseHeader(t *testing.T) {
 	}
 }
 
+// TestParseTelemetryPacket validates decoding and rejection conditions for UDP packets.
+func TestParseTelemetryPacket(t *testing.T) {
+	validPayload := []byte("health:ok")
+	var validBuf []byte
+	validBuf = append(validBuf, MagicByte, byte(OpTelemetry))
+	var lenBuf [2]byte
+	binary.BigEndian.PutUint16(lenBuf[:], uint16(len(validPayload)))
+	validBuf = append(validBuf, lenBuf[:]...)
+	validBuf = append(validBuf, validPayload...)
+
+	tests := []struct {
+		name        string
+		input       []byte
+		wantOp      OpCode
+		wantPayload []byte
+		wantErr     bool
+	}{
+		{
+			name:        "Valid Telemetry Packet",
+			input:       validBuf,
+			wantOp:      OpTelemetry,
+			wantPayload: validPayload,
+			wantErr:     false,
+		},
+		{
+			name:    "Short Buffer Under 4 Bytes",
+			input:   []byte{MagicByte, byte(OpTelemetry)},
+			wantErr: true,
+		},
+		{
+			name:    "Invalid Magic Byte",
+			input:   []byte{0x00, byte(OpTelemetry), 0x00, 0x02, 'o', 'k'},
+			wantErr: true,
+		},
+		{
+			name:    "Truncated Payload",
+			input:   []byte{MagicByte, byte(OpTelemetry), 0x00, 0x10, 'o', 'k'},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			op, payload, err := ParseTelemetryPacket(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ParseTelemetryPacket() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if !tt.wantErr {
+				if op != tt.wantOp {
+					t.Errorf("expected op %v, got %v", tt.wantOp, op)
+				}
+				if !bytes.Equal(payload, tt.wantPayload) {
+					t.Errorf("expected payload %s, got %s", tt.wantPayload, payload)
+				}
+			}
+		})
+	}
+}
+
 // BenchmarkParseHeader proves that header parsing requires 0 heap allocations.
 func BenchmarkParseHeader(b *testing.B) {
 	// Construct a valid header

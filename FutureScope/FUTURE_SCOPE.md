@@ -5,11 +5,11 @@ While the current version of ForestDB successfully implements a single-node, hig
 The following milestones outline the technical roadmap for scaling ForestDB into a highly available, enterprise-grade database cluster. We have also introduced a **Phase 1: Near-Term Engine Optimizations** to directly address immediate architectural improvements before scaling out.
 
 ### Phase 1: Near-Term Engine Optimizations
-Before moving to distributed consensus, we will address the immediate architectural improvements to solidify the single-node engine:
-*   **Dynamic Memory Pooling:** Implement `sync.Pool` for payload buffers to support dynamic key/value sizes while maintaining zero-allocation properties, reducing memory footprint for idle connections.
-*   **Accurate Memory Tracking:** Refine `MemTable` size calculations to accurately track struct and pointer overhead to prevent edge-case OOMs.
-*   **I/O Latency Monitoring & Backpressure:** Introduce metrics around disk flush latencies to ensure slow I/O does not unknowingly block the network ingestion layer.
-*   **Heuristic-Based Compaction:** Upgrade from fixed `CompactL0toL1` to a dynamic trigger based on L0 file counts and level size multipliers.
+*   **[COMPLETED] I/O Latency Monitoring & Backpressure:** Engine metrics monitor WAL fsync durations, MemTable swap latencies, and parsing latency without blocking ingestion loops.
+*   **[COMPLETED] Heuristic-Based Compaction:** Wired L0->L1 compaction trigger based on L0 file counts, integrated with RCU versioning and obsolete file purging.
+*   **[COMPLETED] Dual-Protocol Ingestion & Isolation:** Non-blocking dual-protocol ingestion separating mission-critical TCP mutations from loss-tolerant UDP telemetry with bounded `sync.Pool` buffer recycling.
+*   **Dynamic Memory Pooling:** Expand `sync.Pool` for dynamic variable key/value sizes while maintaining zero-allocation properties.
+*   **Accurate Memory Tracking:** Refine `MemTable` size calculations to track internal struct and pointer alignment overhead.
 
 ### Phase 2: Distributed Consensus & Replication
 To move from a single-node engine to a highly available cluster, we will implement the **Raft Consensus Algorithm**.
@@ -34,11 +34,10 @@ The current engine supports L0 to L1 background compaction and exact-match point
 *   **Secondary Indexing:** Introduce asynchronous secondary indexes to support querying data beyond just primary key lookups.
 
 ### Phase 5: Enterprise Security & Observability
-To ensure ForestDB is ready for production workloads in heavily regulated environments:
-*   **TLS/mTLS Encryption:** Secure the raw TCP binary protocol with Transport Layer Security, ensuring data-in-transit is encrypted between clients and across Raft cluster nodes.
-*   **Prometheus Metrics & Profiling:** Expose an HTTP `/metrics` endpoint to monitor cache hit rates, WAL flush latencies, compaction write amplification, and active connection counts in real time.
+*   **[COMPLETED] TLS/mTLS Encryption:** Implemented two-way certificate authentication (`crypto/tls`) enforcing TLS 1.3 mutual authentication for encrypted node-to-node communication.
+*   **[COMPLETED] Prometheus Metrics & Grafana Dashboard:** Implemented a zero-allocation, stdlib-only Prometheus `/metrics` exporter tracking RED metrics and engine internals, complete with pre-built Grafana dashboards.
 *   **Role-Based Access Control (RBAC):** Implement lightweight, token-based authentication and authorization for the binary protocol.
 
 ### Phase 6: Ecosystem & Tooling
 *   **CLI Introspection Tool:** Build a standalone CLI utility (e.g., `forest-cli inspect`) that can parse and print the binary structures of `.sst` files, Bloom Filters, and WALs offline for debugging.
-*   **Official Client SDKs:** Develop idiomatic client libraries in Go, Rust, and Python that natively speak the zero-allocation Forest binary protocol, complete with connection pooling and automatic leader-discovery routing.
+*   **Official Client SDKs:** Develop idiomatic client libraries in Go, Rust, and Python that natively speak the zero-allocation Forest binary protocol, complete with connection pooling and automatic leader-discovery routing.
