@@ -9,6 +9,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"runtime"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -286,6 +287,40 @@ func (r *Registry) WritePrometheusText(w io.Writer) error {
 		buf.WriteString(strconv.FormatUint(totalCount, 10))
 		buf.WriteString("\n\n")
 	}
+
+	// Standard Go Runtime Metrics
+	var mStats runtime.MemStats
+	runtime.ReadMemStats(&mStats)
+
+	buf.WriteString("# HELP go_goroutines Number of goroutines that currently exist.\n")
+	buf.WriteString("# TYPE go_goroutines gauge\n")
+	buf.WriteString("go_goroutines ")
+	buf.WriteString(strconv.Itoa(runtime.NumGoroutine()))
+	buf.WriteString("\n\n")
+
+	buf.WriteString("# HELP go_memstats_alloc_bytes Number of bytes allocated and still in use.\n")
+	buf.WriteString("# TYPE go_memstats_alloc_bytes gauge\n")
+	buf.WriteString("go_memstats_alloc_bytes ")
+	buf.WriteString(strconv.FormatUint(mStats.Alloc, 10))
+	buf.WriteString("\n\n")
+
+	buf.WriteString("# HELP go_memstats_sys_bytes Number of bytes obtained from system.\n")
+	buf.WriteString("# TYPE go_memstats_sys_bytes gauge\n")
+	buf.WriteString("go_memstats_sys_bytes ")
+	buf.WriteString(strconv.FormatUint(mStats.Sys, 10))
+	buf.WriteString("\n\n")
+
+	buf.WriteString("# HELP go_memstats_heap_inuse_bytes Number of heap bytes in in-use spans.\n")
+	buf.WriteString("# TYPE go_memstats_heap_inuse_bytes gauge\n")
+	buf.WriteString("go_memstats_heap_inuse_bytes ")
+	buf.WriteString(strconv.FormatUint(mStats.HeapInuse, 10))
+	buf.WriteString("\n\n")
+
+	buf.WriteString("# HELP go_memstats_num_gc Total number of completed GC cycles.\n")
+	buf.WriteString("# TYPE go_memstats_num_gc counter\n")
+	buf.WriteString("go_memstats_num_gc ")
+	buf.WriteString(strconv.FormatUint(uint64(mStats.NumGC), 10))
+	buf.WriteString("\n\n")
 
 	_, err := w.Write(buf.Bytes())
 	return err

@@ -32,8 +32,21 @@ func main() {
 	tlsCertFlag := flag.String("tls-cert", "", "Path to PEM certificate file for mTLS")
 	tlsKeyFlag := flag.String("tls-key", "", "Path to PEM private key file for mTLS")
 	tlsCAFlag := flag.String("tls-ca", "", "Path to PEM root CA certificate for client certificate validation")
+	genCertsFlag := flag.Bool("gen-certs", false, "Generate self-signed development mTLS certificates (ca.crt, server.crt/key, client.crt/key) and exit")
 
 	flag.Parse()
+
+	// If --gen-certs flag is set, generate development certificates and exit.
+	if *genCertsFlag {
+		if err := network.GenerateAndSaveDevCerts("."); err != nil {
+			log.Fatalf("failed to generate development mTLS certificates: %v", err)
+		}
+		log.Println("Generated development mTLS certificates successfully in current directory:")
+		log.Println("  - ca.crt (CA certificate)")
+		log.Println("  - server.crt, server.key (Server TLS certificate pair)")
+		log.Println("  - client.crt, client.key (Client TLS certificate pair)")
+		return
+	}
 
 	// Ensure the WAL directory exists before initializing the engine.
 	if err := os.MkdirAll(*walDirFlag, 0755); err != nil {

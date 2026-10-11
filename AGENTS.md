@@ -12,3 +12,4 @@
 - Do not add or remove third-party dependencies without explicit user confirmation.
 - Keep the context window lean: do not load files into context unless actively modifying them.
 - Run active linters and tests via `test-discipline` before staging any changes.
+- Never run `git commit` or `git push` without explicit user instruction. Always leave changes uncommitted for user review.

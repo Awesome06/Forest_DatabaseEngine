@@ -22,6 +22,16 @@ go.work
 # Local DB files
 *.wal
 *.sst
+data/
+
+# Binaries and local build outputs
+bin/
+forest_server
+
+# Generated TLS certificates
+*.pem
+*.crt
+*.key
 
 # Antigravity dynamic links (rebuilt per workspace; tracked via .agent/.active-skills.json)
 .agent/skills/*
