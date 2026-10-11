@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Forest_DatabaseEngine/internal/metrics"
 	"github.com/Forest_DatabaseEngine/internal/network"
 )
 
@@ -195,15 +196,22 @@ func (db *DB) CheckFlush() {
 		return
 	}
 
+	start := time.Now()
+
 	// Drain in-flight writers and mark the active table as frozen.
 	active.Freeze()
 
 	// Atomically rotate the MemTables.
 	db.immutableMT.Store(active)
-	db.activeMT.Store(NewMemTable())
+	newMT := NewMemTable()
+	db.activeMT.Store(newMT)
 	
 	// Queue the frozen table for disk persistence.
 	db.flushQ <- active
+
+	metrics.DefaultEngineMetrics.MemTableSwapEvents.Inc()
+	metrics.DefaultEngineMetrics.MemTableSwapDuration.Observe(time.Since(start).Seconds())
+	metrics.DefaultEngineMetrics.MemTableActiveBytes.Set(int64(newMT.Size()))
 }
 
 // flushWorker acts as a background sink, persisting frozen MemTables to L0 SSTables.

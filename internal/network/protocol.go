@@ -18,10 +18,12 @@ const HeaderSize = 8
 type OpCode byte
 
 const (
-	OpEcho   OpCode = 0x01
-	OpPut    OpCode = 0x02
-	OpGet    OpCode = 0x03
-	OpDelete OpCode = 0x04
+	OpEcho      OpCode = 0x01
+	OpPut       OpCode = 0x02
+	OpGet       OpCode = 0x03
+	OpDelete    OpCode = 0x04
+	OpTelemetry OpCode = 0x05
+	OpHeartbeat OpCode = 0x06
 )
 
 // RequestHeader represents the parsed 8-byte TCP packet header.
@@ -71,3 +73,29 @@ func ParseHeader(r io.Reader, buf []byte) (RequestHeader, error) {
 		ValueLen: binary.BigEndian.Uint32(headerBuf[4:8]),
 	}, nil
 }
+
+// TelemetryHeaderSize defines the fixed header size (4 bytes) for UDP datagrams:
+// [MagicByte(1)] [OpCode(1)] [PayloadLen(2)]
+const TelemetryHeaderSize = 4
+
+// ParseTelemetryPacket decodes a UDP datagram slice into an OpCode and payload view.
+// It performs bounds checking and avoids heap allocations by returning a sub-slice of buf.
+func ParseTelemetryPacket(buf []byte) (OpCode, []byte, error) {
+	if len(buf) < TelemetryHeaderSize {
+		return 0, nil, ErrShortBuffer
+	}
+
+	if buf[0] != MagicByte {
+		return 0, nil, fmt.Errorf("%w: expected 0x%X, got 0x%X", ErrInvalidMagic, MagicByte, buf[0])
+	}
+
+	op := OpCode(buf[1])
+	payloadLen := int(binary.BigEndian.Uint16(buf[2:4]))
+
+	if len(buf) < TelemetryHeaderSize+payloadLen {
+		return 0, nil, errors.New("truncated UDP telemetry payload")
+	}
+
+	return op, buf[TelemetryHeaderSize : TelemetryHeaderSize+payloadLen], nil
+}
+

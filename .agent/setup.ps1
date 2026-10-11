@@ -6,10 +6,12 @@ $ErrorActionPreference = "Stop"
 Write-Host "Configuring Antigravity Workspace..." -ForegroundColor Cyan
 
 # 1. Verify Git availability and repository state
-if (-not (Test-Path ".git")) {
+$repoRoot = git rev-parse --show-toplevel 2>$null
+if ($LASTEXITCODE -ne 0 -or -not $repoRoot) {
     Write-Error "Not a git repository. Run 'git init' before setup."
     exit 1
 }
+Set-Location -Path $repoRoot
 
 # 2. Initialize or vendor .agent/.registry submodule
 if (-not (Test-Path ".agent/.registry/skill-map.json")) {

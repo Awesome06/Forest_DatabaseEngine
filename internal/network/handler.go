@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+
+	"github.com/Forest_DatabaseEngine/internal/metrics"
 )
 
 // HandleRequest processes the parsed TCP packet header and payload using zero-allocation strategies.
@@ -14,12 +16,14 @@ func HandleRequest(conn net.Conn, header RequestHeader, payloadBuf []byte, db St
 	
 	// Add this explicit bounds check
 	if totalLen > len(payloadBuf) {
+		metrics.DefaultEngineMetrics.TCPRequestsErrors.Inc()
 		return fmt.Errorf("protocol error: payload length %d exceeds buffer capacity %d", totalLen, len(payloadBuf))
 	}
 	
 	// Read the variable length payload directly into the pre-allocated buffer
 	if totalLen > 0 {
 		if _, err := io.ReadFull(conn, payloadBuf[:totalLen]); err != nil {
+			metrics.DefaultEngineMetrics.TCPRequestsErrors.Inc()
 			return fmt.Errorf("failed to read payload from connection: %w", err)
 		}
 	}
@@ -38,27 +42,34 @@ func HandleRequest(conn net.Conn, header RequestHeader, payloadBuf []byte, db St
 		binary.BigEndian.PutUint32(headerBuf[4:8], header.ValueLen)
 		
 		if _, err := conn.Write(headerBuf[:]); err != nil {
+			metrics.DefaultEngineMetrics.TCPRequestsErrors.Inc()
 			return fmt.Errorf("failed to write echo header: %w", err)
 		}
 		if totalLen > 0 {
 			if _, err := conn.Write(payloadBuf[:totalLen]); err != nil {
+				metrics.DefaultEngineMetrics.TCPRequestsErrors.Inc()
 				return fmt.Errorf("failed to write echo payload: %w", err)
 			}
 		}
+		metrics.DefaultEngineMetrics.TCPRequestsEchoOk.Inc()
 		return nil
 
 	case OpPut:
 		if err := db.Put(key, val); err != nil {
+			metrics.DefaultEngineMetrics.TCPRequestsErrors.Inc()
 			return fmt.Errorf("storage engine failed to process Put: %w", err)
 		}
+		metrics.DefaultEngineMetrics.TCPRequestsPutOk.Inc()
 		return sendAck(conn)
 
 	case OpGet:
 		foundVal, found, err := db.Get(key)
 		if err != nil {
+			metrics.DefaultEngineMetrics.TCPRequestsErrors.Inc()
 			return fmt.Errorf("storage engine failed to process Get: %w", err)
 		}
 		if !found {
+			metrics.DefaultEngineMetrics.TCPRequestsGetOk.Inc()
 			return sendNotFound(conn)
 		}
 		
@@ -70,23 +81,30 @@ func HandleRequest(conn net.Conn, header RequestHeader, payloadBuf []byte, db St
 		binary.BigEndian.PutUint32(headerBuf[4:8], uint32(len(foundVal)))
 		
 		if _, err := conn.Write(headerBuf[:]); err != nil {
+			metrics.DefaultEngineMetrics.TCPRequestsErrors.Inc()
 			return fmt.Errorf("failed to write get header: %w", err)
 		}
 		if _, err := conn.Write(key); err != nil {
+			metrics.DefaultEngineMetrics.TCPRequestsErrors.Inc()
 			return fmt.Errorf("failed to write get key: %w", err)
 		}
 		if _, err := conn.Write(foundVal); err != nil {
+			metrics.DefaultEngineMetrics.TCPRequestsErrors.Inc()
 			return fmt.Errorf("failed to write get value: %w", err)
 		}
+		metrics.DefaultEngineMetrics.TCPRequestsGetOk.Inc()
 		return nil
 
 	case OpDelete:
 		if err := db.Delete(key); err != nil {
+			metrics.DefaultEngineMetrics.TCPRequestsErrors.Inc()
 			return fmt.Errorf("storage engine failed to process Delete: %w", err)
 		}
+		metrics.DefaultEngineMetrics.TCPRequestsDelOk.Inc()
 		return sendAck(conn)
 
 	default:
+		metrics.DefaultEngineMetrics.TCPRequestsErrors.Inc()
 		return sendNotFound(conn)
 	}
 }

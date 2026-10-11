@@ -37,7 +37,11 @@ chmod +x ./scripts/chaos_test.sh
 ### 3. Run the Server Manually
 ```bash
 go build -o bin/forest ./cmd/server
-./bin/forest --port=9000 --wal-dir=./data/wal --sst-dir=./data/sst
+# Plaintext mode:
+./bin/forest --port=9000 --udp-port=9001 --metrics-port=2112 --wal-dir=./data/wal --sst-dir=./data/sst
+
+# Mutual TLS (mTLS) secure mode:
+./bin/forest --port=9000 --udp-port=9001 --metrics-port=2112 --tls-cert=cert.pem --tls-key=key.pem --tls-ca=ca.pem
 ```
 
 ## Design Philosophy
@@ -45,29 +49,36 @@ Most modern applications rely on high-level databases without understanding the 
 1. **Master Lock-Free Concurrency:** Eliminate mutex bottlenecks using atomic pointer swaps in a custom SkipList.
 2. **Defeat Garbage Collection:** Prove that Go can handle extreme network throughput without stop-the-world GC pauses by engineering a zero-allocation hot path.
 3. **Understand Disk I/O:** Implement Read-Copy-Update (RCU) file manifests and background compaction to manage disk fragmentation mathematically.
-4. **Uncompromising Safety:** Ensure production-grade durability by wrapping all disk I/O errors, strictly bounds-checking network payloads, and utilizing CompareAndSwap to eliminate TOCTOU vulnerabilities.
+4. **Dual-Protocol Ingestion & Isolation:** Guarantee mission-critical storage writes over TCP while ingesting loss-tolerant telemetry streams concurrently over UDP using bounded buffer pools.
+5. **Zero-Allocation Observability & mTLS:** Support encrypted cluster communication via mTLS without degrading throughput, and expose real-time Prometheus RED metrics with zero heap allocations on the hot path.
 
 ## Performance: Zero-Allocation Hot Path
-High-level HTTP/REST APIs generate massive amounts of heap allocations, triggering Go's Garbage Collector. Forest circumvents this via a custom TCP binary parser that reads headers directly from OS socket buffers.
+High-level HTTP/REST APIs generate massive amounts of heap allocations, triggering Go's Garbage Collector. Forest circumvents this via custom TCP/UDP binary parsers that read headers directly from OS socket buffers.
 
-**Parser Benchmark (Zero-Copy):**
+**Parser Benchmarks (Zero-Copy):**
 ```text
 goos: windows / linux
 goarch: amd64
-pkg: [github.com/Forest_DatabaseEngine/internal/network](https://github.com/Forest_DatabaseEngine/internal/network)
+pkg: github.com/Forest_DatabaseEngine/internal/network
 cpu: 13th Gen Intel(R) Core(TM) i5-13450HX
-BenchmarkParseHeader-16         206164630                 5.782 ns/op           0 B/op          0 allocs/op
+BenchmarkParseHeader-16             208481912         5.766 ns/op           0 B/op          0 allocs/op
+BenchmarkParseTelemetryPacket-16    828279676         1.457 ns/op           0 B/op          0 allocs/op
+BenchmarkHistogramObserve-16         28135791        42.370 ns/op           0 B/op          0 allocs/op
 ```
-*Result: `5.78ns` parsing latency with **zero heap allocations** per request, allowing the engine to sustain massive throughput without triggering GC pauses.*
+*Result: `5.76ns` TCP parsing latency and `1.45ns` UDP parsing latency with **zero heap allocations** per request, allowing the engine to sustain massive throughput without triggering GC pauses.*
 
 ## System Architecture
 
 ```mermaid
 graph TD
-    Client[TCP Client] -->|Custom Binary Protocol| Server[TCP Server / Parser]
+    Client[TCP/mTLS Client] -->|Custom Binary Protocol| Server[Dual-Protocol Server]
+    UDPClient[UDP Telemetry Agent] -->|Loss-Tolerant Streams| Server
+    Prometheus[Prometheus Scraper] -->|GET /metrics| Server
+
     Server -->|1. Append| WAL[(Write-Ahead Log)]
     Server -->|2. Insert| MemTable[Active MemTable <br/> Lock-Free SkipList]
     Server -->|Read| MemTable
+    Server -->|Ephemeral Health| MetricsBus[Prometheus Metrics Engine]
     
     MemTable -->|Flushes at 4MB| L0[Level 0 SSTables]
     
@@ -81,33 +92,45 @@ graph TD
 ## Core Features
 | Feature | Implementation Details |
 | :--- | :--- |
+| **Mutual TLS (mTLS)** | Full two-way certificate verification via Go standard library `crypto/tls` (TLS 1.3), isolating TLS handshakes from zero-allocation frame parsing. |
+| **Dual-Protocol Ingestion** | Guaranteed delivery for database mutations over TCP, coupled with concurrent non-blocking UDP ingestion (`net.ListenUDP`) with bounded buffer pools and drop protection. |
+| **Production Observability** | Pure Go stdlib Prometheus exposition (`/metrics`) tracking TCP throughput, parsing latency, UDP packet drops, MemTable swaps, and WAL fsync durations with zero hot-path allocations. |
+| **Grafana Dashboard** | Pre-packaged local Grafana dashboard (`assets/grafana-dashboard.json`) visualizing RED metrics, latency histograms, and engine internals in real-time. |
 | **Lock-Free MemTable** | Uses a concurrent SkipList and Go's `sync/atomic` primitives to eliminate thread contention under heavy write load. |
-| **Crash-Safe Durability** | Implements Write-Ahead Logging (WAL) with double-buffering. Ensures zero data loss up to the last network ACK. |
+| **Crash-Safe Durability** | Implements Write-Ahead Logging (WAL) with double-buffering and CRC32 checksums. Ensures zero data loss up to the last network ACK. |
 | **Disk-Optimized SSTables** | Append-only Sorted String Tables featuring integrated custom Bloom Filters (bit arrays) to mathematically eliminate disk reads for non-existent keys. |
-| **RCU Compaction** | A dedicated background worker pool merges Level-0 files into sorted Level-1 files asynchronously. Uses Read-Copy-Update (RCU) reference counting so TCP reads never block during file deletions. |
-| **Production-Grade Resilience** | Hardened against Time-Of-Check to Time-Of-Update (TOCTOU) vulnerabilities during manifest swaps via lock-free `CompareAndSwap` routines. |
+| **RCU Compaction** | A dedicated background worker pool merges Level-0 files into sorted Level-1 files asynchronously using RCU reference counting. |
 
 ## Custom Binary Protocol
-To maximize throughput, Forest uses a strict 8-byte header followed by a variable payload, eliminating the parsing overhead of JSON or HTTP.
+To maximize throughput, Forest uses a strict 8-byte TCP header and a 4-byte UDP telemetry header, eliminating the parsing overhead of JSON or HTTP.
 
+### TCP Request Header (8 Bytes)
 | Field | Size | Description |
 | :--- | :--- | :--- |
 | **Magic Byte** | 1 Byte | Validation byte (`0xA1`) to reject malformed packets immediately. |
-| **OpCode** | 1 Byte | Operation type: `0x01` (GET), `0x02` (SET), `0x03` (DEL). |
-| **Key Length** | 2 Bytes | Unsigned 16-bit integer defining the key size. |
-| **Value Length**| 4 Bytes | Unsigned 32-bit integer defining the payload size. |
+| **OpCode** | 1 Byte | Operation type: `0x01` (Echo), `0x02` (Put), `0x03` (Get), `0x04` (Delete). |
+| **Key Length** | 2 Bytes | Unsigned 16-bit integer defining key size. |
+| **Value Length**| 4 Bytes | Unsigned 32-bit integer defining payload size. |
 | **Payload** | Variable| Raw bytes containing `Key + Value`. |
+
+### UDP Telemetry Header (4 Bytes)
+| Field | Size | Description |
+| :--- | :--- | :--- |
+| **Magic Byte** | 1 Byte | Validation byte (`0xA1`). |
+| **OpCode** | 1 Byte | `0x05` (Telemetry) or `0x06` (Heartbeat). |
+| **Payload Length**| 2 Bytes | Unsigned 16-bit integer defining telemetry payload size. |
+| **Payload** | Variable| Loss-tolerant health/metrics payload. |
 
 ## Project Layout
 ```text
 .
 ├── cmd/
-│   └── server/          # Main application entrypoint
+│   └── server/          # Main application entrypoint with flags for TCP, UDP, mTLS, and Prometheus
 ├── internal/
-│   ├── network/         # Zero-allocation TCP server and binary parser
-│   ├── storage/         # LSM-Tree implementation (MemTable, SSTables, WAL)
-│   ├── compaction/      # Background K-Way Min-Heap merge workers
-│   └── utils/           # Lock-free SkipList, Bloom Filters, and atomic structures
+│   ├── engine/          # LSM-Tree engine core (MemTable, SSTables, WAL, Bloom Filter, Compactor)
+│   ├── network/         # Dual-protocol server, mTLS TLS helpers, zero-allocation TCP/UDP parsers
+│   └── metrics/         # Zero-allocation stdlib Prometheus metrics registry and /metrics handler
+├── assets/              # Architecture diagrams, flamegraphs, and Grafana dashboard JSON
 ├── scripts/             # Chaos testing and benchmarking bash scripts
 ├── data/                # Local storage for WAL and SST files (gitignored)
 └── README.md

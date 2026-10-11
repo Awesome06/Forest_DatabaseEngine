@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Forest_DatabaseEngine/internal/metrics"
 	"github.com/Forest_DatabaseEngine/internal/network"
 )
 
@@ -113,8 +114,12 @@ func (w *WAL) flush() {
 
 	if err == nil {
 		// Sync is called outside the mutex so disk I/O latency does not block active Appends.
+		t0 := time.Now()
 		if syncErr := w.file.Sync(); syncErr != nil {
 			log.Printf("critical: failed to fsync WAL: %v", syncErr)
+		} else {
+			metrics.DefaultEngineMetrics.WALFsyncDuration.Observe(time.Since(t0).Seconds())
+			metrics.DefaultEngineMetrics.WALFsyncTotal.Inc()
 		}
 	}
 }

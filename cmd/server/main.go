@@ -1,27 +1,37 @@
 // Package main is the entry point for the Forest Database Engine server.
-// It initializes the storage engine, sets up the TCP network listener,
-// and manages graceful shutdown procedures.
+// It initializes the storage engine, sets up the dual-protocol network listener (TCP/mTLS and UDP),
+// exposes the Prometheus /metrics endpoint, and manages graceful shutdown procedures.
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/Forest_DatabaseEngine/internal/engine"
+	"github.com/Forest_DatabaseEngine/internal/metrics"
 	"github.com/Forest_DatabaseEngine/internal/network"
 )
 
 func main() {
 	// Parse command line flags for server configuration.
 	portFlag := flag.Int("port", 9000, "TCP port to listen on for incoming client connections")
+	udpPortFlag := flag.Int("udp-port", 9001, "UDP port to listen on for loss-tolerant telemetry datagrams (0 to disable)")
+	metricsPortFlag := flag.Int("metrics-port", 2112, "HTTP port to expose Prometheus /metrics endpoint (0 to disable)")
 	walDirFlag := flag.String("wal-dir", "data/wal", "Directory path for Write-Ahead Log (WAL) files")
-	// sstDirFlag is provided to match the CLI usage from the README.
-	// Currently unused by engine.NewDB, but available for future use.
 	_ = flag.String("sst-dir", "data/sst", "Directory path for Sorted String Table (SSTable) files")
+
+	// TLS / mTLS configuration flags
+	tlsCertFlag := flag.String("tls-cert", "", "Path to PEM certificate file for mTLS")
+	tlsKeyFlag := flag.String("tls-key", "", "Path to PEM private key file for mTLS")
+	tlsCAFlag := flag.String("tls-ca", "", "Path to PEM root CA certificate for client certificate validation")
+
 	flag.Parse()
 
 	// Ensure the WAL directory exists before initializing the engine.
@@ -37,21 +47,63 @@ func main() {
 		log.Fatalf("failed to initialize storage engine at %s: %v", walPath, err)
 	}
 
-	// Initialize the TCP network server.
-	addr := fmt.Sprintf("127.0.0.1:%d", *portFlag)
-	tcpServer := network.NewServer(addr, dbEngine)
+	// Prepare network options
+	var serverOpts []network.ServerOption
+
+	if *udpPortFlag > 0 {
+		udpAddr := fmt.Sprintf("127.0.0.1:%d", *udpPortFlag)
+		serverOpts = append(serverOpts, network.WithUDP(udpAddr))
+	}
+
+	if *tlsCertFlag != "" && *tlsKeyFlag != "" {
+		tlsConfig, err := network.LoadServerTLSConfig(*tlsCertFlag, *tlsKeyFlag, *tlsCAFlag)
+		if err != nil {
+			log.Fatalf("failed to load TLS configuration: %v", err)
+		}
+		serverOpts = append(serverOpts, network.WithTLS(tlsConfig))
+		log.Println("Mutual TLS (mTLS) enabled with two-way certificate authentication.")
+	}
+
+	// Initialize the dual-protocol network server.
+	tcpAddr := fmt.Sprintf("127.0.0.1:%d", *portFlag)
+	netServer := network.NewServer(tcpAddr, dbEngine, serverOpts...)
+
+	// Start Prometheus /metrics HTTP server if enabled
+	var metricsServer *http.Server
+	if *metricsPortFlag > 0 {
+		metricsAddr := fmt.Sprintf("127.0.0.1:%d", *metricsPortFlag)
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", metrics.DefaultEngineMetrics.Registry.Handler())
+		metricsServer = &http.Server{
+			Addr:    metricsAddr,
+			Handler: mux,
+		}
+
+		go func() {
+			log.Printf("Forest Observability: Prometheus endpoint listening on http://%s/metrics\n", metricsAddr)
+			if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("metrics HTTP server exited: %v", err)
+			}
+		}()
+	}
 
 	// Handle graceful shutdown via OS signals.
-	go func() {
-		sigChan := make(chan os.Signal, 1)
-		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-		<-sigChan
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
+	go func() {
+		<-sigChan
 		log.Println("Received termination signal. Shutting down database...")
 
-		// Stop accepting new TCP connections.
-		if err := tcpServer.Stop(); err != nil {
-			log.Printf("error stopping TCP server: %v", err)
+		if metricsServer != nil {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			_ = metricsServer.Shutdown(shutdownCtx)
+		}
+
+		// Stop network listeners (TCP/TLS and UDP)
+		if err := netServer.Stop(); err != nil {
+			log.Printf("error stopping network server: %v", err)
 		}
 
 		// Flush remaining MemTables and close WAL.
@@ -64,7 +116,7 @@ func main() {
 	}()
 
 	// Start accepting connections. This call blocks indefinitely.
-	if err := tcpServer.Start(); err != nil {
-		log.Fatalf("TCP server encountered a fatal error: %v", err)
+	if err := netServer.Start(); err != nil {
+		log.Fatalf("Network server encountered a fatal error: %v", err)
 	}
 }

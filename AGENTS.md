@@ -2,7 +2,7 @@
 
 ## Bootstrap Protocol
 - On session initialization:
-  1. Verify Git hook configuration by checking if `.git/hooks/pre-commit` exists. If missing, execute `setup.ps1` (or verify that `.agent/.registry` is present).
+  1. Verify Git hook configuration by checking if `.git/hooks/pre-commit` exists. If missing, execute `.agent/setup.ps1` (or verify that `.agent/.registry` is present).
   2. Check if the local `.agent/skills/` directory contains active domain skills.
   3. If missing or empty, invoke the global `workspace-initializer` skill with the stack detected from repository files.
   4. Once skills are linked, strictly enforce their constraints during all subsequent code generation and review tasks.
